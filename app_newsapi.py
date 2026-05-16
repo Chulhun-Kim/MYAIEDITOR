@@ -59,7 +59,12 @@ def fetch_newsapi_json(api_key: str, params: Dict, timeout: int = 15) -> Dict:
       GET https://newsapi.org/v2/everything
     """
     _require_requests()
-    api_key = (api_key or "").strip()
+
+    api_key = st.secrets.get(
+        "OPENAI_API_KEY",
+        os.getenv("OPENAI_API_KEY", "")
+    )  
+
     if not api_key:
         raise ValueError("NEWSAPI_KEY가 비어 있습니다.")
 

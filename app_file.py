@@ -97,7 +97,10 @@ def extract_text_from_upload(uploaded_file) -> Tuple[str, str]:
 
 
 def generate_ai_summary(filename: str, text: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = st.secrets.get(
+       "OPENAI_API_KEY",
+       os.getenv("OPENAI_API_KEY", "")
+    )
 
     if OpenAI is None:
         return (

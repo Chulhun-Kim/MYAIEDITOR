@@ -54,7 +54,10 @@ def make_buffer_item(title: str, body: str) -> Dict:
     }
 
 def generate_ai_draft(title: str, body: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = st.secrets.get(
+        "OPENAI_API_KEY",
+        os.getenv("OPENAI_API_KEY", "")
+    )
 
     if OpenAI is None:
         return "[AI 오류]\nopenai 패키지가 설치되어 있지 않습니다.\n\n터미널에서 다음 명령을 실행하세요.\npython -m pip install openai"

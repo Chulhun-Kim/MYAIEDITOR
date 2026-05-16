@@ -631,7 +631,10 @@ def llm_generate(
 ) -> str:
     context = normalize_space(context)
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = st.secrets.get(
+      "OPENAI_API_KEY",
+      os.getenv("OPENAI_API_KEY", "")
+).strip()
 
     if not HAS_OPENAI or not api_key:
         return rule_based_draft(context)
@@ -928,7 +931,10 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
 
     with tabs[3]:
         st.subheader("NewsAPI 수집")
-        newsapi_key = os.getenv("NEWSAPI_KEY", "")
+        newsapi_key = st.secrets.get(
+                "NEWSAPI_KEY",
+                 os.getenv("NEWSAPI_KEY", "")
+        )
         panel_result = render_newsapi_panel(newsapi_key)
 
         if isinstance(panel_result, tuple):
