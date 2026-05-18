@@ -7,7 +7,8 @@
 # - SYSTEM_RULES / USER_TEMPLATE 화면 수정 가능
 # - ⓪ 수집 / ① 자료 확인 / ② Draft 생성 / ③ Draft 편집 모두 접기·펼치기 방식
 # - role(system/user) 값 화면 표출
-# - Workspace / Buffer 타입 오류 방어 완성본
+# - Workspace / Buffer 타입 오류 방어
+# - Streamlit Cloud Secrets 지원
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -67,15 +68,22 @@ def clamp(s: str, n: int) -> str:
     return s if len(s) <= n else s[:n] + "…"
 
 
+def get_secret_or_env(key: str, default: str = "") -> str:
+    """
+    Streamlit Cloud Secrets 또는 로컬 .env/환경변수에서 값을 읽는다.
+    """
+    try:
+        value = st.secrets.get(key, "")
+    except Exception:
+        value = ""
+
+    return str(value or os.getenv(key, default) or "").strip()
+
+
 # ============================================================
 # Workspace / Buffer 타입 정규화
 # ============================================================
 def to_workspace_text(value: Any) -> str:
-    """
-    Workspace에는 반드시 문자열만 들어가도록 변환한다.
-    str / list / dict / None 모두 안전하게 처리한다.
-    """
-
     if value is None:
         return ""
 
@@ -177,14 +185,6 @@ def to_workspace_text(value: Any) -> str:
 
 
 def normalize_buffer_items(items: Any) -> List[Dict[str, Any]]:
-    """
-    Buffer에는 반드시 List[Dict]만 들어가도록 변환한다.
-
-    해결 오류:
-    - TypeError: can only concatenate list (not "str") to list
-    - AttributeError: 'list' object has no attribute 'strip'
-    """
-
     if items is None:
         return []
 
@@ -631,10 +631,7 @@ def llm_generate(
 ) -> str:
     context = normalize_space(context)
 
-    api_key = st.secrets.get(
-      "OPENAI_API_KEY",
-      os.getenv("OPENAI_API_KEY", "")
-).strip()
+    api_key = get_secret_or_env("OPENAI_API_KEY")
 
     if not HAS_OPENAI or not api_key:
         return rule_based_draft(context)
@@ -806,6 +803,13 @@ with st.sidebar:
 
     st.divider()
 
+    with st.expander("API 키 상태", expanded=False):
+        openai_loaded = bool(get_secret_or_env("OPENAI_API_KEY"))
+        newsapi_loaded = bool(get_secret_or_env("NEWSAPI_KEY"))
+
+        st.caption(f"OPENAI_API_KEY 읽힘: {openai_loaded}")
+        st.caption(f"NEWSAPI_KEY 읽힘: {newsapi_loaded}")
+
     with st.expander("초기화", expanded=False):
         if st.button("전체 비우기", use_container_width=True, key="btn_reset_all"):
             reset_all()
@@ -930,12 +934,9 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
         )
 
     with tabs[3]:
-        NEWSAPI_KEY = (
-            st.secrets.get("NEWSAPI_KEY", None)
-            or os.getenv("NEWSAPI_KEY")
-        )        
+        newsapi_key = get_secret_or_env("NEWSAPI_KEY")
 
-        panel_result = render_newsapi_panel(NEWSAPI_KEY)
+        panel_result = render_newsapi_panel(newsapi_key)
 
         if isinstance(panel_result, tuple):
             ws_text = panel_result[0] if len(panel_result) > 0 else ""
@@ -1009,7 +1010,7 @@ with st.expander("② Draft 생성 열기", expanded=False):
     if st.session_state.last_commit_hint:
         st.success(st.session_state.last_commit_hint)
 
-    model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+    model = get_secret_or_env("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini"
 
     system_rules = st.text_area(
         "SYSTEM_RULES",
