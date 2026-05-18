@@ -930,12 +930,12 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
         )
 
     with tabs[3]:
-        st.subheader("NewsAPI 수집")
-        newsapi_key = st.secrets.get(
-                "NEWSAPI_KEY",
-                 os.getenv("NEWSAPI_KEY", "")
-        )
-        panel_result = render_newsapi_panel(newsapi_key)
+        NEWSAPI_KEY = (
+            st.secrets.get("NEWSAPI_KEY", None)
+            or os.getenv("NEWSAPI_KEY")
+        )        
+
+        panel_result = render_newsapi_panel(NEWSAPI_KEY)
 
         if isinstance(panel_result, tuple):
             ws_text = panel_result[0] if len(panel_result) > 0 else ""
