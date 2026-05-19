@@ -41,13 +41,11 @@ class RssItem:
 def _now_iso() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-
 def _clean_text(s: str) -> str:
     if not s:
         return ""
     s = re.sub(r"\s+", " ", s).strip()
     return s
-
 
 def _extract_entry_text(entry) -> str:
     """
@@ -65,9 +63,7 @@ def _extract_entry_text(entry) -> str:
             summary = entry.content[0].get("value", "") or summary
         except Exception:
             pass
-
     return _clean_text(summary)
-
 
 def _extract_published(entry) -> str:
     if hasattr(entry, "published") and entry.published:
@@ -86,8 +82,8 @@ def _extract_published(entry) -> str:
 
     return ""
 
-
-def fetch_rss_items(feed_url: str, source_name: str, limit: int = 20, timeout: int = 10) -> List[RssItem]:
+def fetch_rss_items(feed_url: str, source_name: str, 
+                    limit: int = 20, timeout: int = 10) -> List[RssItem]:
     """
     RSS URL을 파싱해 RssItem 리스트로 반환
     """
@@ -124,7 +120,6 @@ def fetch_rss_items(feed_url: str, source_name: str, limit: int = 20, timeout: i
         )
     return items
 
-
 def _items_to_workspace_text(items: List[RssItem], heading: str) -> str:
     """
     Workspace에 넣기 좋은 텍스트(마크다운 호환)
@@ -148,7 +143,6 @@ def _items_to_workspace_text(items: List[RssItem], heading: str) -> str:
 
     return "\n".join(lines).strip() + "\n"
 
-
 def _items_to_buffer(items: List[RssItem]) -> List[Dict]:
     """
     app4.py의 buffer_items 형식으로 변환
@@ -171,12 +165,12 @@ def _items_to_buffer(items: List[RssItem]) -> List[Dict]:
         )
     return out
 
-
 # ------------------------------------------------------------
 # Streamlit UI 컴포넌트
 # ------------------------------------------------------------
 DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
-   # (기존) Google News 일반
+
+   # Google News 일반
     "Google RSS": {
         "한국 주요뉴스": "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko",
         "정치": "https://news.google.com/rss/search?q=정치&hl=ko&gl=KR&ceid=KR:ko",
@@ -194,8 +188,6 @@ DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
         "문화": "https://www.yna.co.kr/rss/culture.xml",
     },
 
-    # KBS는 'KBS 뉴스' RSS 대신 'KBS World Radio' RSS 사용(공식 RSS 목록 존재)
-    # (카테고리 확장은 KBS World RSS 목록을 더 추가하면 됨)
     "KBS World": {
         "국내(Domestic)": "http://world.kbs.co.kr/rss/rss_news.htm?lang=e&id=Dm",
         "국제(International)": "http://world.kbs.co.kr/rss/rss_news.htm?lang=e&id=In",
@@ -203,8 +195,23 @@ DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
         "경제(Economy)": "http://world.kbs.co.kr/rss/rss_news.htm?lang=e&id=Ec",
     },
 
-    # Reuters/AP는 직접 RSS가 불안정/종료 케이스가 많아 Google News RSS로 우회
-    # Google News RSS는 '검색어' 기반이므로 카테고리를 "검색 키워드"처럼 운용
+    # BBC RSS 추가
+    "BBC": {
+        "Top": "http://feeds.bbci.co.uk/news/rss.xml",
+        "World": "http://feeds.bbci.co.uk/news/world/rss.xml",
+        "Business": "http://feeds.bbci.co.uk/news/business/rss.xml",
+        "Technology": "http://feeds.bbci.co.uk/news/technology/rss.xml",
+    },
+
+    # NHK RSS 추가
+    "NHK": {
+        "일본 주요뉴스": "https://www3.nhk.or.jp/rss/news/cat0.xml",
+        "사회": "https://www3.nhk.or.jp/rss/news/cat1.xml",
+        "정치": "https://www3.nhk.or.jp/rss/news/cat4.xml",
+        "국제": "https://www3.nhk.or.jp/rss/news/cat6.xml",
+        "경제": "https://www3.nhk.or.jp/rss/news/cat5.xml",
+    },
+
     "Reuters (via Google News)": {
         "Top": "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US&gl=US&ceid=US:en",
         "World": "https://news.google.com/rss/search?q=site:reuters.com+world&hl=en-US&gl=US&ceid=US:en",
@@ -220,8 +227,7 @@ DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
         "Business": "https://news.google.com/rss/search?q=site:apnews.com+business&hl=en-US&gl=US&ceid=US:en",
         "Tech": "https://news.google.com/rss/search?q=site:apnews.com+technology&hl=en-US&gl=US&ceid=US:en",
     },
-
- }
+}
 
 def _init_rss_cache() -> None:
     """
@@ -234,19 +240,16 @@ def _init_rss_cache() -> None:
     if "rss_last_info" not in st.session_state:
         st.session_state.rss_last_info = ""
 
-
 def clear_rss_cache() -> None:
     st.session_state.rss_last_ws_text = None
     st.session_state.rss_last_buffer = []
     st.session_state.rss_last_info = ""
 
-
 def render_rss_panel() -> Tuple[Optional[str], List[Dict]]:
     """
     RSS 패널을 렌더링하고,
     - workspace에 추가할 텍스트(str) 1개 (없으면 None)
-    - buffer_items(list[dict]) (없으면 [])
-    를 반환
+    - buffer_items(list[dict]) (없으면 [])를 반환
 
     중요:
     - 'RSS 불러오기' 클릭 후 rerun이 일어나도,
@@ -287,7 +290,6 @@ def render_rss_panel() -> Tuple[Optional[str], List[Dict]]:
             category = "Custom"
 
     do_fetch = st.button("RSS 불러오기", use_container_width=True)
-
     # 새로 불러오지 않으면 "마지막 캐시"를 그대로 반환
     if not do_fetch:
         # 캐시가 있으면 상태 표시
