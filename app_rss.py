@@ -82,93 +82,26 @@ def _extract_published(entry) -> str:
 
     return ""
 
-def fetch_rss_items(
-    feed_url: str,
-    source_name: str,
-    limit: int = 20,
-    timeout: int = 20,
-) -> List[RssItem]:
+def fetch_rss_items(feed_url: str, source_name: str, 
+                    limit: int = 20, timeout: int = 10) -> List[RssItem]:
     """
     RSS URL을 파싱해 RssItem 리스트로 반환
-
-    보완 내용:
-    1. Streamlit Cloud에서 차단을 줄이기 위해 브라우저처럼 보이는 headers 사용
-    2. requests 방식 실패 시 feedparser.parse(url)로 한 번 더 재시도
-    3. 빈 RSS 결과와 연결 오류를 구분해 메시지 표시
     """
     if feedparser is None:
         raise RuntimeError("feedparser가 설치되어 있지 않습니다. pip install feedparser")
 
     fetched_at = _now_iso()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ),
-        "Accept": "application/rss+xml, application/xml, text/xml, */*",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Connection": "close",
-    }
-
-    parsed = None
-    last_error = None
-
-    # ------------------------------------------------------------
-    # 1차 시도: requests로 RSS 원문을 가져온 뒤 feedparser로 파싱
-    # ------------------------------------------------------------
+    # requests로 먼저 가져오면 깨지는 RSS가 줄어듦
     if requests is not None:
-        try:
-            resp = requests.get(
-                feed_url,
-                timeout=timeout,
-                headers=headers,
-            )
-            resp.raise_for_status()
-            parsed = feedparser.parse(resp.content)
-
-        except Exception as e:
-            last_error = e
-
-    # ------------------------------------------------------------
-    # 2차 시도: requests 실패 시 feedparser가 URL을 직접 읽도록 재시도
-    # ------------------------------------------------------------
-    if parsed is None:
-        try:
-            parsed = feedparser.parse(feed_url)
-        except Exception as e:
-            last_error = e
-
-    # ------------------------------------------------------------
-    # 그래도 실패한 경우
-    # ------------------------------------------------------------
-    if parsed is None:
-        raise RuntimeError(f"RSS 수집 실패: {last_error}")
-
-    entries = getattr(parsed, "entries", []) or []
-
-    # feedparser는 실패해도 parsed 객체를 반환할 수 있으므로 bozo 체크
-    bozo = getattr(parsed, "bozo", False)
-    bozo_exception = getattr(parsed, "bozo_exception", None)
-
-    if not entries:
-        if last_error:
-            raise RuntimeError(
-                f"RSS 항목을 가져오지 못했습니다. 원인: {last_error}"
-            )
-
-        if bozo and bozo_exception:
-            raise RuntimeError(
-                f"RSS 파싱은 되었지만 항목이 없습니다. 원인: {bozo_exception}"
-            )
-
-        raise RuntimeError(
-            "RSS 항목이 없습니다. RSS 주소가 맞는지, 해당 사이트가 RSS 제공을 중단했는지 확인하세요."
-        )
+        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        parsed = feedparser.parse(resp.content)
+    else:
+        parsed = feedparser.parse(feed_url)
 
     items: List[RssItem] = []
-
+    entries = getattr(parsed, "entries", []) or []
     for e in entries[:limit]:
         title = _clean_text(getattr(e, "title", "") or "")
         link = _clean_text(getattr(e, "link", "") or "")
@@ -185,7 +118,6 @@ def fetch_rss_items(
                 fetched_at=fetched_at,
             )
         )
-
     return items
 
 def _items_to_workspace_text(items: List[RssItem], heading: str) -> str:
@@ -296,78 +228,6 @@ DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
         "Tech": "https://news.google.com/rss/search?q=site:apnews.com+technology&hl=en-US&gl=US&ceid=US:en",
     },
 
-    "정책브리핑": {
-        # 공통 RSS
-        "정책뉴스": "https://www.korea.kr/rss/policy.xml",
-        "보도자료": "https://www.korea.kr/rss/pressrelease.xml",
-        "사실은 이렇습니다": "https://www.korea.kr/rss/fact.xml",
-        "부처 브리핑": "https://www.korea.kr/rss/ebriefing.xml",
-        "청와대 브리핑": "https://www.korea.kr/rss/president.xml",
-        "국무회의 브리핑": "https://www.korea.kr/rss/cabinet.xml",
-        "연설문": "https://www.korea.kr/rss/speech.xml",
-
-        # 부처
-        "국무조정실": "https://www.korea.kr/rss/dept_opm.xml",
-        "재정경제부": "https://www.korea.kr/rss/dept_moef.xml",
-        "과학기술정보통신부": "https://www.korea.kr/rss/dept_msit.xml",
-        "교육부": "https://www.korea.kr/rss/dept_moe.xml",
-        "외교부": "https://www.korea.kr/rss/dept_mofa.xml",
-        "통일부": "https://www.korea.kr/rss/dept_unikorea.xml",
-        "법무부": "https://www.korea.kr/rss/dept_moj.xml",
-        "국방부": "https://www.korea.kr/rss/dept_mnd.xml",
-        "행정안전부": "https://www.korea.kr/rss/dept_mois.xml",
-        "국가보훈부": "https://www.korea.kr/rss/dept_mpva.xml",
-        "문화체육관광부": "https://www.korea.kr/rss/dept_mcst.xml",
-        "농림축산식품부": "https://www.korea.kr/rss/dept_mafra.xml",
-        "산업통상부": "https://www.korea.kr/rss/dept_motir.xml",
-        "보건복지부": "https://www.korea.kr/rss/dept_mw.xml",
-        "기후에너지환경부": "https://www.korea.kr/rss/dept_mcee.xml",
-        "고용노동부": "https://www.korea.kr/rss/dept_moel.xml",
-        "성평등가족부": "https://www.korea.kr/rss/dept_mogef.xml",
-        "국토교통부": "https://www.korea.kr/rss/dept_molit.xml",
-        "해양수산부": "https://www.korea.kr/rss/dept_mof.xml",
-        "중소벤처기업부": "https://www.korea.kr/rss/dept_mss.xml",
-        "기획예산처": "https://www.korea.kr/rss/dept_mpb.xml",
-        "인사혁신처": "https://www.korea.kr/rss/dept_mpm.xml",
-        "법제처": "https://www.korea.kr/rss/dept_moleg.xml",
-        "식품의약품안전처": "https://www.korea.kr/rss/dept_mfds.xml",
-        "국가데이터처": "https://www.korea.kr/rss/dept_mods.xml",
-        "지식재산처": "https://www.korea.kr/rss/dept_moip.xml",
-
-        # 청
-        "국세청": "https://www.korea.kr/rss/dept_nts.xml",
-        "관세청": "https://www.korea.kr/rss/dept_customs.xml",
-        "조달청": "https://www.korea.kr/rss/dept_pps.xml",
-        "우주항공청": "https://www.korea.kr/rss/dept_kasa.xml",
-        "재외동포청": "https://www.korea.kr/rss/dept_oka.xml",
-        "검찰청": "https://www.korea.kr/rss/dept_spo.xml",
-        "병무청": "https://www.korea.kr/rss/dept_mma.xml",
-        "방위사업청": "https://www.korea.kr/rss/dept_dapa.xml",
-        "경찰청": "https://www.korea.kr/rss/dept_npa.xml",
-        "소방청": "https://www.korea.kr/rss/dept_nfa.xml",
-        "국가유산청": "https://www.korea.kr/rss/dept_khs.xml",
-        "농촌진흥청": "https://www.korea.kr/rss/dept_rda.xml",
-        "산림청": "https://www.korea.kr/rss/dept_forest.xml",
-        "질병관리청": "https://www.korea.kr/rss/dept_kdca.xml",
-        "기상청": "https://www.korea.kr/rss/dept_kma.xml",
-        "행정중심복합도시건설청": "https://www.korea.kr/rss/dept_macc.xml",
-        "새만금개발청": "https://www.korea.kr/rss/dept_sda.xml",
-        "해양경찰청": "https://www.korea.kr/rss/dept_kcg.xml",
-
-        # 위원회
-        "방송미디어통신위원회": "https://www.korea.kr/rss/dept_kmcc.xml",
-        "원자력안전위원회": "https://www.korea.kr/rss/dept_nssc.xml",
-        "공정거래위원회": "https://www.korea.kr/rss/dept_ftc.xml",
-        "금융위원회": "https://www.korea.kr/rss/dept_fsc.xml",
-        "국민권익위원회": "https://www.korea.kr/rss/dept_acrc.xml",
-        "개인정보보호위원회": "https://www.korea.kr/rss/dept_pipc.xml",
-
-        # 대통령 소속 위원회
-        "국민통합위원회": "https://www.korea.kr/rss/dept_k_cohesion.xml",
-        "저출산고령사회위원회": "https://www.korea.kr/rss/dept_betterfuture.xml",
-        "경제사회노동위원회": "https://www.korea.kr/rss/dept_esdc.xml",
-        "국가기후위기대응위원회": "https://www.korea.kr/rss/dept_pcccr.xml",
-    },
 }
 
 def _init_rss_cache() -> None:
