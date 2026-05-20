@@ -212,6 +212,29 @@ DEFAULT_FEEDS: Dict[str, Dict[str, str]] = {
         "경제": "https://www3.nhk.or.jp/rss/news/cat5.xml",
     },
 
+    "New York Times": {
+        "Home": "https://rss.nytimes.com/services/xml/rss/nyt/HomePage.xml",
+        "World": "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+        "US": "https://rss.nytimes.com/services/xml/rss/nyt/US.xml",
+        "Business": "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+        "Technology": "https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml",
+    },
+
+    "The Guardian": {
+        "World": "https://www.theguardian.com/world/rss",
+        "US": "https://www.theguardian.com/us-news/rss",
+        "Politics": "https://www.theguardian.com/politics/rss",
+        "Business": "https://www.theguardian.com/business/rss",
+        "Technology": "https://www.theguardian.com/technology/rss",
+    },
+
+    "Le Monde": {
+        "English": "https://www.lemonde.fr/en/rss/une.xml",
+        "International": "https://www.lemonde.fr/en/international/rss_full.xml",
+        "Politics": "https://www.lemonde.fr/en/politics/rss_full.xml",
+        "Economy": "https://www.lemonde.fr/en/economy/rss_full.xml",
+    },
+
     "Reuters (via Google News)": {
         "Top": "https://news.google.com/rss/search?q=site:reuters.com&hl=en-US&gl=US&ceid=US:en",
         "World": "https://news.google.com/rss/search?q=site:reuters.com+world&hl=en-US&gl=US&ceid=US:en",
