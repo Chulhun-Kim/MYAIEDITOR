@@ -82,26 +82,93 @@ def _extract_published(entry) -> str:
 
     return ""
 
-def fetch_rss_items(feed_url: str, source_name: str, 
-                    limit: int = 20, timeout: int = 10) -> List[RssItem]:
+def fetch_rss_items(
+    feed_url: str,
+    source_name: str,
+    limit: int = 20,
+    timeout: int = 20,
+) -> List[RssItem]:
     """
     RSS URL을 파싱해 RssItem 리스트로 반환
+
+    보완 내용:
+    1. Streamlit Cloud에서 차단을 줄이기 위해 브라우저처럼 보이는 headers 사용
+    2. requests 방식 실패 시 feedparser.parse(url)로 한 번 더 재시도
+    3. 빈 RSS 결과와 연결 오류를 구분해 메시지 표시
     """
     if feedparser is None:
         raise RuntimeError("feedparser가 설치되어 있지 않습니다. pip install feedparser")
 
     fetched_at = _now_iso()
 
-    # requests로 먼저 가져오면 깨지는 RSS가 줄어듦
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Connection": "close",
+    }
+
+    parsed = None
+    last_error = None
+
+    # ------------------------------------------------------------
+    # 1차 시도: requests로 RSS 원문을 가져온 뒤 feedparser로 파싱
+    # ------------------------------------------------------------
     if requests is not None:
-        resp = requests.get(feed_url, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"})
-        resp.raise_for_status()
-        parsed = feedparser.parse(resp.content)
-    else:
-        parsed = feedparser.parse(feed_url)
+        try:
+            resp = requests.get(
+                feed_url,
+                timeout=timeout,
+                headers=headers,
+            )
+            resp.raise_for_status()
+            parsed = feedparser.parse(resp.content)
+
+        except Exception as e:
+            last_error = e
+
+    # ------------------------------------------------------------
+    # 2차 시도: requests 실패 시 feedparser가 URL을 직접 읽도록 재시도
+    # ------------------------------------------------------------
+    if parsed is None:
+        try:
+            parsed = feedparser.parse(feed_url)
+        except Exception as e:
+            last_error = e
+
+    # ------------------------------------------------------------
+    # 그래도 실패한 경우
+    # ------------------------------------------------------------
+    if parsed is None:
+        raise RuntimeError(f"RSS 수집 실패: {last_error}")
+
+    entries = getattr(parsed, "entries", []) or []
+
+    # feedparser는 실패해도 parsed 객체를 반환할 수 있으므로 bozo 체크
+    bozo = getattr(parsed, "bozo", False)
+    bozo_exception = getattr(parsed, "bozo_exception", None)
+
+    if not entries:
+        if last_error:
+            raise RuntimeError(
+                f"RSS 항목을 가져오지 못했습니다. 원인: {last_error}"
+            )
+
+        if bozo and bozo_exception:
+            raise RuntimeError(
+                f"RSS 파싱은 되었지만 항목이 없습니다. 원인: {bozo_exception}"
+            )
+
+        raise RuntimeError(
+            "RSS 항목이 없습니다. RSS 주소가 맞는지, 해당 사이트가 RSS 제공을 중단했는지 확인하세요."
+        )
 
     items: List[RssItem] = []
-    entries = getattr(parsed, "entries", []) or []
+
     for e in entries[:limit]:
         title = _clean_text(getattr(e, "title", "") or "")
         link = _clean_text(getattr(e, "link", "") or "")
@@ -118,6 +185,7 @@ def fetch_rss_items(feed_url: str, source_name: str,
                 fetched_at=fetched_at,
             )
         )
+
     return items
 
 def _items_to_workspace_text(items: List[RssItem], heading: str) -> str:
