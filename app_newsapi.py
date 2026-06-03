@@ -1,12 +1,4 @@
 # app_newsapi.py
-# ------------------------------------------------------------
-# NewsAPI 수집 모듈 (Everything 전용 / 최종 안정판)
-# - NewsAPI = "검색 기반 수집기"로 단순화
-# - q(검색어) 필수
-# - 기간 프리셋(24h/3d/7d) + 캘린더(date_input) 지원
-# - session_state 캐시 유지
-# - 반환: (workspace_text_or_none, buffer_items_list)
-# ------------------------------------------------------------
 
 from __future__ import annotations
 
@@ -58,17 +50,22 @@ def _require_requests() -> None:
 def get_newsapi_key(passed_key: Optional[str] = None) -> str:
     """
     NewsAPI 키를 안전하게 읽는다.
+
     우선순위:
     1. render_newsapi_panel(newsapi_key)로 전달된 값
     2. Streamlit Cloud Secrets의 NEWSAPI_KEY
     3. 로컬 .env / 환경변수의 NEWSAPI_KEY
     """
-    key = (
+    try:
+        secret_key = str(st.secrets.get("NEWSAPI_KEY", "")).strip()
+    except Exception:
+        secret_key = ""
+
+    return (
         (passed_key or "").strip()
-        or str(st.secrets.get("NEWSAPI_KEY", "")).strip()
+        or secret_key
         or os.getenv("NEWSAPI_KEY", "").strip()
     )
-    return key
 
 
 def fetch_newsapi_json(api_key: str, params: Dict, timeout: int = 15) -> Dict:
@@ -84,10 +81,7 @@ def fetch_newsapi_json(api_key: str, params: Dict, timeout: int = 15) -> Dict:
         raise ValueError("NEWSAPI_KEY가 비어 있습니다.")
 
     url = f"{NEWSAPI_BASE}/everything"
-
-    headers = {
-        "X-Api-Key": api_key
-    }
+    headers = {"X-Api-Key": api_key}
 
     resp = requests.get(
         url,
@@ -228,9 +222,6 @@ def render_newsapi_panel(newsapi_key: str = "") -> Tuple[Optional[str], List[Dic
         st.warning("NEWSAPI_KEY가 없습니다. Streamlit Secrets 또는 .env에 NEWSAPI_KEY를 설정하세요.")
         return st.session_state.newsapi_last_ws_text, st.session_state.newsapi_last_buffer
 
-    # -------------------------
-    # UI: 기본 입력
-    # -------------------------
     row1 = st.columns([3, 2, 2, 1])
 
     with row1[0]:
@@ -289,9 +280,6 @@ def render_newsapi_panel(newsapi_key: str = "") -> Tuple[Optional[str], List[Dic
     with row2[2]:
         st.caption("Everything(검색) 기반 수집입니다. 카테고리/국가 개념을 쓰지 않습니다.")
 
-    # -------------------------
-    # UI: 기간/도메인/소스 옵션
-    # -------------------------
     with st.expander("기간/도메인/소스(옵션)"):
         if "newsapi_from_dt" not in st.session_state:
             st.session_state.newsapi_from_dt = None
@@ -366,9 +354,6 @@ def render_newsapi_panel(newsapi_key: str = "") -> Tuple[Optional[str], List[Dic
         from_date = from_dt.isoformat() if from_dt else ""
         to_date = to_dt.isoformat() if to_dt else ""
 
-    # -------------------------
-    # Fetch 전: 캐시 프리뷰
-    # -------------------------
     if not do_fetch:
         if st.session_state.newsapi_last_info:
             st.success(st.session_state.newsapi_last_info)
@@ -396,9 +381,6 @@ def render_newsapi_panel(newsapi_key: str = "") -> Tuple[Optional[str], List[Dic
 
         return st.session_state.newsapi_last_ws_text, st.session_state.newsapi_last_buffer
 
-    # -------------------------
-    # Fetch 수행
-    # -------------------------
     try:
         if not q.strip():
             st.error("검색어(q)는 필수입니다.")
