@@ -1,22 +1,28 @@
 # app_stock.py
 # ------------------------------------------------------------
-# 장전 주식 분석 시스템 - FinanceDataReader 안정화 버전
-# - pykrx/KRX 로그인 없이 동작하는 1차 버전
-# - 한국 종목: FinanceDataReader 가격/거래량 기반 분석
-# - 해외 지표: FinanceDataReader 참고 지표
+# 장전 주식 분석 시스템 2차 버전
+# - FinanceDataReader: 국내 종목 가격/거래량 + 해외 지표
+# - NewsAPI: 장전 뉴스 수집
+# - Streamlit Cloud 대응
 # - app_editor.py의 Workspace / Buffer 반영 구조와 호환
 # ------------------------------------------------------------
 
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import datetime as dt
 import math
+import os
 import re
 
 import pandas as pd
 import streamlit as st
+
+try:
+    import requests
+except Exception:
+    requests = None
 
 try:
     import FinanceDataReader as fdr
@@ -25,60 +31,54 @@ except Exception:
 
 
 # ============================================================
-# 기본 종목군
+# 기본 설정
 # ============================================================
-DEFAULT_KOSPI_TICKERS: Dict[str, str] = {
-    "005930": "삼성전자",
-    "000660": "SK하이닉스",
-    "373220": "LG에너지솔루션",
-    "005380": "현대차",
-    "000270": "기아",
-    "207940": "삼성바이오로직스",
-    "068270": "셀트리온",
-    "005490": "POSCO홀딩스",
-    "035420": "NAVER",
-    "035720": "카카오",
-    "105560": "KB금융",
-    "055550": "신한지주",
-    "012330": "현대모비스",
-    "028260": "삼성물산",
-    "066570": "LG전자",
-    "096770": "SK이노베이션",
-    "051910": "LG화학",
-    "003670": "포스코퓨처엠",
-    "032830": "삼성생명",
-    "086790": "하나금융지주",
-}
+NEWSAPI_BASE = "https://newsapi.org/v2/everything"
 
-DEFAULT_KOSDAQ_TICKERS: Dict[str, str] = {
-    "247540": "에코프로비엠",
-    "086520": "에코프로",
-    "091990": "셀트리온헬스케어",
-    "028300": "HLB",
-    "196170": "알테오젠",
-    "277810": "레인보우로보틱스",
-    "035900": "JYP Ent.",
-    "041510": "에스엠",
-    "112040": "위메이드",
-    "293490": "카카오게임즈",
-    "058470": "리노공업",
-    "039030": "이오테크닉스",
-    "403870": "HPSP",
-    "214150": "클래시스",
-    "263750": "펄어비스",
-}
+DEFAULT_NEWS_QUERY = (
+    "반도체 OR AI OR 엔비디아 OR HBM OR "
+    "방산 OR 조선 OR 원전 OR 2차전지 OR 바이오 OR "
+    "한국증시 OR 코스피 OR 환율 OR 금리"
+)
 
-GLOBAL_INDICATORS = [
-    ("나스닥", "IXIC"),
-    ("S&P500", "US500"),
-    ("다우존스", "DJI"),
-    ("달러/원", "USD/KRW"),
+DEFAULT_STOCKS: List[Tuple[str, str, str]] = [
+    # 반도체 / AI
+    ("005930", "삼성전자", "KOSPI"),
+    ("000660", "SK하이닉스", "KOSPI"),
+    ("042700", "한미반도체", "KOSPI"),
+    ("058470", "리노공업", "KOSDAQ"),
+    ("095340", "ISC", "KOSDAQ"),
+    ("036930", "주성엔지니어링", "KOSDAQ"),
+    ("240810", "원익IPS", "KOSDAQ"),
+    ("108320", "LX세미콘", "KOSPI"),
+    # 2차전지
+    ("373220", "LG에너지솔루션", "KOSPI"),
+    ("006400", "삼성SDI", "KOSPI"),
+    ("247540", "에코프로비엠", "KOSDAQ"),
+    ("086520", "에코프로", "KOSDAQ"),
+    ("003670", "포스코퓨처엠", "KOSPI"),
+    ("051910", "LG화학", "KOSPI"),
+    # 방산 / 조선 / 원전
+    ("012450", "한화에어로스페이스", "KOSPI"),
+    ("079550", "LIG넥스원", "KOSPI"),
+    ("064350", "현대로템", "KOSPI"),
+    ("329180", "HD현대중공업", "KOSPI"),
+    ("010140", "삼성중공업", "KOSPI"),
+    ("009540", "HD한국조선해양", "KOSPI"),
+    ("034020", "두산에너빌리티", "KOSPI"),
+    ("052690", "한전기술", "KOSPI"),
+    # 자동차 / 인터넷 / 바이오 / 금융
+    ("005380", "현대차", "KOSPI"),
+    ("000270", "기아", "KOSPI"),
+    ("035420", "NAVER", "KOSPI"),
+    ("035720", "카카오", "KOSPI"),
+    ("068270", "셀트리온", "KOSPI"),
+    ("207940", "삼성바이오로직스", "KOSPI"),
+    ("105560", "KB금융", "KOSPI"),
+    ("055550", "신한지주", "KOSPI"),
 ]
 
 
-# ============================================================
-# 데이터 구조
-# ============================================================
 @dataclass
 class StockPick:
     ticker: str
@@ -90,9 +90,19 @@ class StockPick:
     change_rate: float
     volume: int
     volume_ratio: float
-    trading_value: float
-    date: str
+    trading_value_est: float
+    news_hits: int
     reasons: List[str]
+
+
+@dataclass
+class NewsItem:
+    title: str
+    url: str
+    published: str
+    source: str
+    description: str
+    content: str
 
 
 # ============================================================
@@ -102,36 +112,16 @@ def _now_iso() -> str:
     return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _clean_text(s: str) -> str:
+def _today_str() -> str:
+    return dt.date.today().strftime("%Y-%m-%d")
+
+
+def _clean(s: Any) -> str:
     s = str(s or "")
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+    return re.sub(r"\s+", " ", s).strip()
 
 
-def _fmt_num(n: float) -> str:
-    try:
-        return f"{int(float(n)):,}"
-    except Exception:
-        return str(n)
-
-
-def _fmt_pct(x: float) -> str:
-    try:
-        return f"{float(x):+.2f}%"
-    except Exception:
-        return str(x)
-
-
-def _fmt_ratio(x: float) -> str:
-    try:
-        if float(x) <= 0:
-            return "-"
-        return f"{float(x):.2f}배"
-    except Exception:
-        return "-"
-
-
-def _safe_float(v, default: float = 0.0) -> float:
+def _safe_float(v: Any, default: float = 0.0) -> float:
     try:
         if pd.isna(v):
             return default
@@ -140,7 +130,7 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
-def _safe_int(v, default: int = 0) -> int:
+def _safe_int(v: Any, default: int = 0) -> int:
     try:
         if pd.isna(v):
             return default
@@ -149,117 +139,124 @@ def _safe_int(v, default: int = 0) -> int:
         return default
 
 
+def _fmt_num(n: float) -> str:
+    try:
+        return f"{int(n):,}"
+    except Exception:
+        return str(n)
+
+
+def _fmt_pct(x: float) -> str:
+    return f"{x:+.2f}%"
+
+
+def _fmt_ratio(x: float) -> str:
+    if x <= 0:
+        return "-"
+    return f"{x:.2f}배"
+
+
+def _normalize_ticker(ticker: str) -> str:
+    return str(ticker or "").strip().zfill(6)
+
+
+def get_secret_or_env(key: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(key, "")
+    except Exception:
+        value = ""
+    return str(value or os.getenv(key, default) or "").strip()
+
+
+# ============================================================
+# FinanceDataReader 데이터
+# ============================================================
 def _require_fdr() -> None:
     if fdr is None:
         raise RuntimeError("FinanceDataReader가 설치되어 있지 않습니다. requirements.txt에 finance-datareader를 추가하세요.")
 
 
-# ============================================================
-# 종목 목록
-# ============================================================
-def parse_custom_tickers(text: str) -> Dict[str, str]:
-    """
-    입력 예:
-    005930 삼성전자
-    000660,SK하이닉스
-    035420
-    """
-    out: Dict[str, str] = {}
-    for line in str(text or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        parts = re.split(r"[,\s]+", line, maxsplit=1)
-        ticker = re.sub(r"\D", "", parts[0]).zfill(6)
-        name = parts[1].strip() if len(parts) > 1 else ticker
-        if len(ticker) == 6:
-            out[ticker] = name
-    return out
-
-
-def get_target_tickers(markets: List[str], mode: str, custom_text: str) -> Dict[str, Dict[str, str]]:
-    targets: Dict[str, Dict[str, str]] = {}
-
-    if mode == "직접 입력":
-        custom = parse_custom_tickers(custom_text)
-        if custom:
-            targets["사용자입력"] = custom
-        return targets
-
-    if "KOSPI" in markets:
-        targets["KOSPI"] = DEFAULT_KOSPI_TICKERS.copy()
-    if "KOSDAQ" in markets:
-        targets["KOSDAQ"] = DEFAULT_KOSDAQ_TICKERS.copy()
-
-    return targets
-
-
-# ============================================================
-# FinanceDataReader 수집
-# ============================================================
-def fetch_price_frame(ticker: str, days: int = 20) -> pd.DataFrame:
+def fetch_stock_history(ticker: str, days: int = 45) -> Optional[pd.DataFrame]:
     _require_fdr()
     end = dt.date.today()
-    start = end - dt.timedelta(days=days + 20)
-    df = fdr.DataReader(ticker, start, end)
-    if df is None or df.empty:
-        return pd.DataFrame()
-    df = df.dropna().copy()
-    return df
+    start = end - dt.timedelta(days=days)
+    ticker = _normalize_ticker(ticker)
 
-
-def analyze_one_stock(ticker: str, name: str, market: str) -> Optional[Dict]:
     try:
-        df = fetch_price_frame(ticker, days=20)
-        if df is None or df.empty or len(df) < 2:
+        df = fdr.DataReader(ticker, start, end)
+        if df is None or df.empty:
             return None
-
-        df = df.tail(10).copy()
-        latest = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        close = _safe_float(latest.get("Close"))
-        prev_close = _safe_float(prev.get("Close"))
-        volume = _safe_int(latest.get("Volume"))
-        prev_volume = _safe_int(prev.get("Volume"))
-
-        if close <= 0 or prev_close <= 0 or volume <= 0:
-            return None
-
-        change_rate = (close - prev_close) / prev_close * 100
-        volume_ratio = volume / prev_volume if prev_volume > 0 else 0
-        trading_value = close * volume
-        date = str(df.index[-1].date())
-
-        return {
-            "ticker": ticker,
-            "name": name,
-            "market": market,
-            "close": close,
-            "change_rate": change_rate,
-            "volume": volume,
-            "volume_ratio": volume_ratio,
-            "trading_value": trading_value,
-            "date": date,
-        }
+        df = df.dropna().copy()
+        return df
     except Exception:
         return None
 
 
-def fetch_global_indicators(days: int = 7) -> List[Dict]:
+def analyze_one_stock(ticker: str, name: str, market: str, news_items: List[NewsItem]) -> Optional[Dict[str, Any]]:
+    df = fetch_stock_history(ticker)
+    if df is None or len(df) < 3:
+        return None
+
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    close = _safe_float(last.get("Close"))
+    prev_close = _safe_float(prev.get("Close"))
+    volume = _safe_int(last.get("Volume"))
+    prev_volume = _safe_int(prev.get("Volume"))
+
+    if close <= 0 or prev_close <= 0:
+        return None
+
+    change_rate = (close - prev_close) / prev_close * 100
+    volume_ratio = volume / prev_volume if prev_volume > 0 else 0
+    trading_value_est = close * volume
+
+    ma5 = _safe_float(df["Close"].tail(5).mean()) if "Close" in df.columns else 0
+    ma20 = _safe_float(df["Close"].tail(20).mean()) if len(df) >= 20 and "Close" in df.columns else ma5
+
+    news_hits = count_news_hits(name, ticker, news_items)
+
+    return {
+        "ticker": ticker,
+        "name": name,
+        "market": market,
+        "date": str(df.index[-1].date()),
+        "close": close,
+        "change_rate": change_rate,
+        "volume": volume,
+        "volume_ratio": volume_ratio,
+        "trading_value_est": trading_value_est,
+        "ma5": ma5,
+        "ma20": ma20,
+        "news_hits": news_hits,
+    }
+
+
+def fetch_global_indicators(days: int = 10) -> List[Dict[str, Any]]:
     if fdr is None:
         return []
 
     end = dt.date.today()
-    start = end - dt.timedelta(days=days + 10)
-    out: List[Dict] = []
+    start = end - dt.timedelta(days=days + 5)
 
-    for name, symbol in GLOBAL_INDICATORS:
+    candidates = [
+        ("나스닥", "IXIC"),
+        ("S&P500", "US500"),
+        ("다우존스", "DJI"),
+        ("달러/원", "USD/KRW"),
+    ]
+
+    out: List[Dict[str, Any]] = []
+
+    for name, symbol in candidates:
         try:
             df = fdr.DataReader(symbol, start, end)
-            if df is None or df.empty or "Close" not in df.columns or len(df.dropna()) < 2:
+            if df is None or df.empty or "Close" not in df.columns:
                 continue
             df = df.dropna()
+            if len(df) < 2:
+                continue
             last = float(df["Close"].iloc[-1])
             prev = float(df["Close"].iloc[-2])
             chg = (last - prev) / prev * 100 if prev else 0
@@ -271,116 +268,276 @@ def fetch_global_indicators(days: int = 7) -> List[Dict]:
 
 
 # ============================================================
+# NewsAPI
+# ============================================================
+def fetch_newsapi_items(api_key: str, query: str, limit: int = 20, days_back: int = 2) -> List[NewsItem]:
+    if requests is None:
+        raise RuntimeError("requests가 설치되어 있지 않습니다.")
+
+    api_key = (api_key or "").strip()
+    if not api_key:
+        return []
+
+    today = dt.date.today()
+    from_date = today - dt.timedelta(days=int(days_back))
+
+    params = {
+        "q": query.strip(),
+        "language": "ko",
+        "sortBy": "publishedAt",
+        "pageSize": int(limit),
+        "from": from_date.isoformat(),
+        "to": today.isoformat(),
+    }
+    headers = {"X-Api-Key": api_key}
+
+    resp = requests.get(NEWSAPI_BASE, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    if payload.get("status") != "ok":
+        return []
+
+    out: List[NewsItem] = []
+    for a in (payload.get("articles") or [])[: int(limit)]:
+        src = a.get("source") or {}
+        out.append(
+            NewsItem(
+                title=_clean(a.get("title")),
+                url=_clean(a.get("url")),
+                published=_clean(a.get("publishedAt")),
+                source=_clean(src.get("name")),
+                description=_clean(a.get("description")),
+                content=_clean(a.get("content")),
+            )
+        )
+    return out
+
+
+def count_news_hits(name: str, ticker: str, news_items: List[NewsItem]) -> int:
+    name = _clean(name)
+    if not name:
+        return 0
+    count = 0
+    for it in news_items:
+        text = f"{it.title} {it.description} {it.content}"
+        if name in text:
+            count += 1
+    return count
+
+
+def build_news_keywords_summary(news_items: List[NewsItem]) -> List[str]:
+    keywords = [
+        "반도체", "AI", "엔비디아", "HBM", "삼성전자", "SK하이닉스",
+        "방산", "조선", "원전", "2차전지", "바이오", "환율", "금리", "코스피",
+        "유가", "중동", "관세", "수출", "실적", "수주",
+    ]
+    text = " ".join([f"{n.title} {n.description} {n.content}" for n in news_items])
+    found = []
+    for k in keywords:
+        c = text.count(k)
+        if c > 0:
+            found.append((k, c))
+    found.sort(key=lambda x: x[1], reverse=True)
+    return [f"{k}({c})" for k, c in found[:10]]
+
+
+# ============================================================
 # 점수화
 # ============================================================
-def make_reasons(item: Dict, direction: str) -> List[str]:
-    pct = _safe_float(item.get("change_rate"))
-    vr = _safe_float(item.get("volume_ratio"))
-    tv = _safe_float(item.get("trading_value"))
-
+def make_candidate_reasons(row: Dict[str, Any], news_items: List[NewsItem]) -> List[str]:
     reasons: List[str] = []
+    change_rate = _safe_float(row.get("change_rate"))
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    trading_value = _safe_float(row.get("trading_value_est"))
+    ma5 = _safe_float(row.get("ma5"))
+    ma20 = _safe_float(row.get("ma20"))
+    news_hits = _safe_int(row.get("news_hits"))
 
-    if direction == "상승 관심":
-        if pct > 0:
-            reasons.append(f"최근 거래일 등락률이 {_fmt_pct(pct)}로 상승 마감")
-        if vr >= 2:
-            reasons.append(f"거래량이 직전 거래일 대비 {_fmt_ratio(vr)} 수준으로 증가")
-        elif vr >= 1.3:
-            reasons.append("거래량이 직전 거래일보다 증가")
-        if tv >= 50_000_000_000:
-            reasons.append(f"거래대금이 약 {_fmt_num(tv)}원으로 시장 관심 확대")
-        reasons.append("가격 흐름과 거래량을 함께 고려한 장전 관심 종목")
-    else:
-        if pct < 0:
-            reasons.append(f"최근 거래일 등락률이 {_fmt_pct(pct)}로 하락 마감")
-        if vr >= 1.5:
-            reasons.append(f"변동 과정에서 거래량이 {_fmt_ratio(vr)}로 증가")
-        if pct >= 7:
-            reasons.append("최근 거래일 급등에 따른 단기 과열 가능성")
-        if tv >= 50_000_000_000:
-            reasons.append(f"거래대금이 약 {_fmt_num(tv)}원으로 변동성 확대 가능성")
-        reasons.append("장전 변동성 주의 종목")
+    if change_rate > 0:
+        reasons.append(f"직전 거래일 등락률 {_fmt_pct(change_rate)}")
+    elif change_rate < 0:
+        reasons.append(f"직전 거래일 조정({_fmt_pct(change_rate)}) 후 반등 여부 확인")
 
+    if volume_ratio >= 2:
+        reasons.append(f"거래량이 직전 거래일 대비 {_fmt_ratio(volume_ratio)}로 급증")
+    elif volume_ratio >= 1.3:
+        reasons.append(f"거래량이 직전 거래일 대비 {_fmt_ratio(volume_ratio)}로 증가")
+
+    if ma5 > ma20 and ma20 > 0:
+        reasons.append("5일 평균가격이 20일 평균가격을 상회")
+
+    if trading_value >= 100_000_000_000:
+        reasons.append(f"추정 거래대금 {_fmt_num(trading_value)}원으로 유동성 양호")
+
+    if news_hits > 0:
+        reasons.append(f"최근 뉴스에서 종목명 직접 언급 {news_hits}건")
+
+    if not reasons:
+        reasons.append("가격·거래량·뉴스 흐름을 종합해 장전 점검 필요")
+
+    return reasons[:5]
+
+
+def make_risk_reasons(row: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    change_rate = _safe_float(row.get("change_rate"))
+    volume_ratio = _safe_float(row.get("volume_ratio"))
+    trading_value = _safe_float(row.get("trading_value_est"))
+
+    if change_rate <= -3:
+        reasons.append(f"직전 거래일 하락폭 확대({_fmt_pct(change_rate)})")
+    if change_rate >= 8:
+        reasons.append(f"직전 거래일 급등({_fmt_pct(change_rate)})에 따른 단기 과열 가능성")
+    if volume_ratio >= 2:
+        reasons.append(f"거래량이 {_fmt_ratio(volume_ratio)}로 확대돼 변동성 주의")
+    if trading_value >= 100_000_000_000:
+        reasons.append("거래대금이 커 장중 변동성 확대 가능성")
+    if not reasons:
+        reasons.append("단기 변동성 확인 필요")
     return reasons[:4]
 
 
-def score_items(items: List[Dict], min_trading_value: int, min_volume_ratio: float, top_n: int) -> Tuple[List[StockPick], List[StockPick]]:
-    up: List[StockPick] = []
-    down: List[StockPick] = []
+def score_candidates(rows: List[Dict[str, Any]], top_n: int = 10) -> Tuple[List[StockPick], List[StockPick]]:
+    candidates: List[StockPick] = []
+    risks: List[StockPick] = []
 
-    for it in items:
-        pct = _safe_float(it.get("change_rate"))
-        vr = _safe_float(it.get("volume_ratio"))
-        tv = _safe_float(it.get("trading_value"))
+    for r in rows:
+        change_rate = _safe_float(r.get("change_rate"))
+        volume_ratio = _safe_float(r.get("volume_ratio"))
+        trading_value = _safe_float(r.get("trading_value_est"))
+        ma5 = _safe_float(r.get("ma5"))
+        ma20 = _safe_float(r.get("ma20"))
+        news_hits = _safe_int(r.get("news_hits"))
 
-        if tv < min_trading_value:
-            continue
+        momentum_score = max(min(change_rate, 10), -10) * 2.5
+        volume_score = min(volume_ratio, 5) * 7.0
+        liquidity_score = min(math.log10(max(trading_value, 1)) * 2.2, 30)
+        trend_score = 8 if ma5 > ma20 and ma20 > 0 else 0
+        news_score = min(news_hits * 8, 24)
 
-        up_score = 50 + max(min(pct, 10), -10) * 3.0 + min(max(vr, 0), 5) * 8.0 + min(math.log10(max(tv, 1)) * 3, 35)
-        down_score = 50 + max(min(-pct, 10), -10) * 3.5 + min(max(vr, 0), 5) * 7.0 + min(math.log10(max(tv, 1)) * 2.5, 30)
+        buy_score = 45 + momentum_score + volume_score + liquidity_score + trend_score + news_score
 
-        if pct > 0 and vr >= min_volume_ratio:
-            up.append(
+        if volume_ratio >= 1.2 or news_hits > 0 or change_rate > 1:
+            candidates.append(
                 StockPick(
-                    ticker=it["ticker"], name=it["name"], market=it["market"], direction="상승 관심",
-                    score=round(up_score, 1), close=it["close"], change_rate=round(pct, 2),
-                    volume=it["volume"], volume_ratio=round(vr, 2), trading_value=tv,
-                    date=it["date"], reasons=make_reasons(it, "상승 관심")
+                    ticker=str(r.get("ticker")),
+                    name=str(r.get("name")),
+                    market=str(r.get("market")),
+                    direction="매매 관심",
+                    score=round(buy_score, 1),
+                    close=round(_safe_float(r.get("close")), 2),
+                    change_rate=round(change_rate, 2),
+                    volume=_safe_int(r.get("volume")),
+                    volume_ratio=round(volume_ratio, 2),
+                    trading_value_est=round(trading_value, 0),
+                    news_hits=news_hits,
+                    reasons=make_candidate_reasons(r, []),
                 )
             )
 
-        if (pct < 0 and vr >= max(1.0, min_volume_ratio - 0.3)) or (pct >= 7 and vr >= 1.5):
-            down.append(
+        risk_score = 45 + abs(change_rate) * 3.0 + min(volume_ratio, 5) * 7.0 + min(math.log10(max(trading_value, 1)) * 2.0, 24)
+        if change_rate <= -3 or change_rate >= 8 or volume_ratio >= 2.5:
+            risks.append(
                 StockPick(
-                    ticker=it["ticker"], name=it["name"], market=it["market"], direction="하락 주의",
-                    score=round(down_score, 1), close=it["close"], change_rate=round(pct, 2),
-                    volume=it["volume"], volume_ratio=round(vr, 2), trading_value=tv,
-                    date=it["date"], reasons=make_reasons(it, "하락 주의")
+                    ticker=str(r.get("ticker")),
+                    name=str(r.get("name")),
+                    market=str(r.get("market")),
+                    direction="주의",
+                    score=round(risk_score, 1),
+                    close=round(_safe_float(r.get("close")), 2),
+                    change_rate=round(change_rate, 2),
+                    volume=_safe_int(r.get("volume")),
+                    volume_ratio=round(volume_ratio, 2),
+                    trading_value_est=round(trading_value, 0),
+                    news_hits=news_hits,
+                    reasons=make_risk_reasons(r),
                 )
             )
 
-    up = sorted(up, key=lambda x: x.score, reverse=True)[:top_n]
-    down = sorted(down, key=lambda x: x.score, reverse=True)[:top_n]
-    return up, down
+    candidates.sort(key=lambda x: x.score, reverse=True)
+    risks.sort(key=lambda x: x.score, reverse=True)
+    return candidates[: int(top_n)], risks[: int(top_n)]
 
 
 # ============================================================
 # 출력 변환
 # ============================================================
 def picks_to_dataframe(picks: List[StockPick]) -> pd.DataFrame:
-    return pd.DataFrame([
-        {
-            "구분": p.direction,
-            "시장": p.market,
-            "종목코드": p.ticker,
-            "종목명": p.name,
-            "점수": p.score,
-            "기준일": p.date,
-            "종가": round(p.close, 0),
-            "등락률": p.change_rate,
-            "거래량": p.volume,
-            "거래량배율": p.volume_ratio,
-            "거래대금": round(p.trading_value, 0),
-            "근거": " / ".join(p.reasons),
-        }
-        for p in picks
-    ])
+    rows = []
+    for p in picks:
+        rows.append(
+            {
+                "구분": p.direction,
+                "시장": p.market,
+                "종목코드": p.ticker,
+                "종목명": p.name,
+                "점수": p.score,
+                "종가": p.close,
+                "등락률": p.change_rate,
+                "거래량": p.volume,
+                "거래량배율": p.volume_ratio,
+                "추정거래대금": p.trading_value_est,
+                "뉴스언급": p.news_hits,
+                "근거": " / ".join(p.reasons),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
-def build_market_brief(indicators: List[Dict]) -> str:
+def news_to_dataframe(news_items: List[NewsItem]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "일시": n.published,
+                "출처": n.source,
+                "제목": n.title,
+                "요약": n.description,
+                "링크": n.url,
+            }
+            for n in news_items
+        ]
+    )
+
+
+def build_market_brief(indicators: List[Dict[str, Any]]) -> str:
     if not indicators:
-        return "- 해외 참고 지표를 가져오지 못했습니다."
-    return "\n".join([
-        f"- {it['name']}({it['symbol']}): {it['last']:.2f}, 전일 대비 {_fmt_pct(it['change_rate'])} ({it['date']})"
-        for it in indicators
-    ])
+        return "- 해외시장 참고 지표를 가져오지 못했습니다."
+    lines = []
+    for it in indicators:
+        lines.append(f"- {it['name']}({it['symbol']}): {it['last']:.2f}, 전일 대비 {_fmt_pct(it['change_rate'])} ({it['date']})")
+    return "\n".join(lines)
 
 
-def build_workspace_text(markets: List[str], up_picks: List[StockPick], down_picks: List[StockPick], indicators: List[Dict], target_count: int) -> str:
-    dates = sorted({p.date for p in up_picks + down_picks})
-    latest_date = dates[-1] if dates else dt.date.today().isoformat()
+def build_news_brief(news_items: List[NewsItem]) -> str:
+    if not news_items:
+        return "- NewsAPI 뉴스가 수집되지 않았습니다."
 
-    today = dt.date.today().strftime("%Y-%m-%d")
+    lines = []
+    keywords = build_news_keywords_summary(news_items)
+    if keywords:
+        lines.append(f"- 주요 반복 키워드: {', '.join(keywords)}")
+
+    for i, n in enumerate(news_items[:10], start=1):
+        lines.append(f"- {i}. {n.title} / {n.source} / {n.published}")
+        if n.description:
+            lines.append(f"  - {n.description}")
+        if n.url:
+            lines.append(f"  - 링크: {n.url}")
+    return "\n".join(lines)
+
+
+def build_workspace_text(
+    latest_date: str,
+    markets: List[str],
+    target_count: int,
+    candidates: List[StockPick],
+    risks: List[StockPick],
+    indicators: List[Dict[str, Any]],
+    news_items: List[NewsItem],
+    news_query: str,
+) -> str:
+    today = _today_str()
 
     lines: List[str] = []
     lines.append("# 장전 주식 분석")
@@ -389,64 +546,83 @@ def build_workspace_text(markets: List[str], up_picks: List[StockPick], down_pic
     lines.append(f"- 실제 분석시각: {_now_iso()}")
     lines.append(f"- 분석 시장: {', '.join(markets) if markets else '사용자 입력'}")
     lines.append(f"- 분석 대상 종목 수: {target_count}개")
-    lines.append("- 데이터 소스: FinanceDataReader")
+    lines.append("- 데이터 소스: FinanceDataReader + NewsAPI")
+    lines.append(f"- 뉴스 검색어: {news_query}")
     lines.append("")
 
-    lines.append("## 상승 관심 종목")
-    if not up_picks:
-        lines.append("- 조건에 맞는 상승 관심 종목이 없습니다.")
+    lines.append("## ① 오늘 시장 환경")
+    lines.append(build_market_brief(indicators))
+    lines.append("")
+
+    lines.append("## ② 장전 주요 뉴스")
+    lines.append(build_news_brief(news_items))
+    lines.append("")
+
+    lines.append("## ③ 오늘 매매 관심 종목 TOP")
+    if not candidates:
+        lines.append("- 조건에 맞는 매매 관심 종목이 없습니다.")
     else:
-        for i, p in enumerate(up_picks, start=1):
+        for i, p in enumerate(candidates, start=1):
             lines.append(f"### {i}. {p.name}({p.ticker}) / {p.market} / {p.score}점")
-            lines.append(f"- 기준일: {p.date}")
             lines.append(f"- 종가: {_fmt_num(p.close)}원")
-            lines.append(f"- 등락률: {_fmt_pct(p.change_rate)}")
+            lines.append(f"- 직전 거래일 등락률: {_fmt_pct(p.change_rate)}")
             lines.append(f"- 거래량: {_fmt_num(p.volume)}주")
             lines.append(f"- 거래량 배율: {_fmt_ratio(p.volume_ratio)}")
-            lines.append(f"- 거래대금: 약 {_fmt_num(p.trading_value)}원")
+            lines.append(f"- 추정 거래대금: {_fmt_num(p.trading_value_est)}원")
+            lines.append(f"- 뉴스 언급: {p.news_hits}건")
             for r in p.reasons:
                 lines.append(f"- {r}")
             lines.append("")
-    lines.append("## 하락 주의 종목")
-    if not down_picks:
-        lines.append("- 조건에 맞는 하락 주의 종목이 없습니다.")
+
+    lines.append("## ④ 오늘 주의 종목 TOP")
+    if not risks:
+        lines.append("- 조건에 맞는 주의 종목이 없습니다.")
     else:
-        for i, p in enumerate(down_picks, start=1):
+        for i, p in enumerate(risks, start=1):
             lines.append(f"### {i}. {p.name}({p.ticker}) / {p.market} / {p.score}점")
-            lines.append(f"- 기준일: {p.date}")
             lines.append(f"- 종가: {_fmt_num(p.close)}원")
-            lines.append(f"- 등락률: {_fmt_pct(p.change_rate)}")
-            lines.append(f"- 거래량: {_fmt_num(p.volume)}주")
+            lines.append(f"- 직전 거래일 등락률: {_fmt_pct(p.change_rate)}")
             lines.append(f"- 거래량 배율: {_fmt_ratio(p.volume_ratio)}")
-            lines.append(f"- 거래대금: 약 {_fmt_num(p.trading_value)}원")
+            lines.append(f"- 추정 거래대금: {_fmt_num(p.trading_value_est)}원")
             for r in p.reasons:
                 lines.append(f"- {r}")
             lines.append("")
-    lines.append("## 유의사항")
-    lines.append("- 본 분석은 공개 가격·거래량 데이터를 바탕으로 한 장전 참고 자료입니다.")
-    lines.append("- 투자 권유나 매매 추천이 아닙니다.")
-    lines.append("- 이 안정화 버전은 pykrx 수급 데이터를 사용하지 않으며, 외국인·기관 수급 분석은 추후 KRX 인증 문제 해결 뒤 추가할 수 있습니다.")
+
+    lines.append("## ⑤ 해석상 유의사항")
+    lines.append("- 이 자료는 공개 주가·거래량·뉴스 흐름을 바탕으로 한 장전 참고자료입니다.")
+    lines.append("- 투자 권유나 매매 추천이 아니며, 실제 매매 판단은 사용자가 별도로 검토해야 합니다.")
+    lines.append("- 현재 버전은 수급·시간외 거래·실시간 호가를 반영하지 않습니다.")
+
     return "\n".join(lines).strip() + "\n"
 
 
-def build_buffer_items(ws_text: str, up_picks: List[StockPick], down_picks: List[StockPick], indicators: List[Dict]) -> List[Dict]:
-    dates = sorted({p.date for p in up_picks + down_picks})
-    latest_date = dates[-1] if dates else dt.date.today().isoformat()
+def build_buffer_items(
+    ws_text: str,
+    latest_date: str,
+    markets: List[str],
+    candidates: List[StockPick],
+    risks: List[StockPick],
+    indicators: List[Dict[str, Any]],
+    news_items: List[NewsItem],
+) -> List[Dict[str, Any]]:
     return [
         {
             "type": "stock_preopen_analysis",
             "title": f"장전 주식 분석 {latest_date}",
             "text": ws_text,
             "meta": {
-                "source": "FinanceDataReader",
+                "source": "FinanceDataReader + NewsAPI",
                 "published": latest_date,
                 "fetched_at": _now_iso(),
-                "up_count": len(up_picks),
-                "down_count": len(down_picks),
+                "markets": markets,
+                "candidate_count": len(candidates),
+                "risk_count": len(risks),
                 "indicators": indicators,
+                "news_count": len(news_items),
                 "raw": {
-                    "up_picks": [asdict(p) for p in up_picks],
-                    "down_picks": [asdict(p) for p in down_picks],
+                    "candidates": [asdict(p) for p in candidates],
+                    "risks": [asdict(p) for p in risks],
+                    "news": [asdict(n) for n in news_items],
                 },
             },
         }
@@ -457,33 +633,34 @@ def build_buffer_items(ws_text: str, up_picks: List[StockPick], down_picks: List
 # 캐시
 # ============================================================
 def _init_stock_cache() -> None:
-    if "stock_last_ws_text" not in st.session_state:
-        st.session_state.stock_last_ws_text = None
-    if "stock_last_buffer" not in st.session_state:
-        st.session_state.stock_last_buffer = []
-    if "stock_last_info" not in st.session_state:
-        st.session_state.stock_last_info = ""
-    if "stock_last_up_df" not in st.session_state:
-        st.session_state.stock_last_up_df = pd.DataFrame()
-    if "stock_last_down_df" not in st.session_state:
-        st.session_state.stock_last_down_df = pd.DataFrame()
-    if "stock_last_indicators" not in st.session_state:
-        st.session_state.stock_last_indicators = []
+    defaults = {
+        "stock_last_ws_text": None,
+        "stock_last_buffer": [],
+        "stock_last_info": "",
+        "stock_last_candidates_df": pd.DataFrame(),
+        "stock_last_risks_df": pd.DataFrame(),
+        "stock_last_news_df": pd.DataFrame(),
+        "stock_last_indicators": [],
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 def clear_stock_cache() -> None:
     st.session_state.stock_last_ws_text = None
     st.session_state.stock_last_buffer = []
     st.session_state.stock_last_info = ""
-    st.session_state.stock_last_up_df = pd.DataFrame()
-    st.session_state.stock_last_down_df = pd.DataFrame()
+    st.session_state.stock_last_candidates_df = pd.DataFrame()
+    st.session_state.stock_last_risks_df = pd.DataFrame()
+    st.session_state.stock_last_news_df = pd.DataFrame()
     st.session_state.stock_last_indicators = []
 
 
 # ============================================================
 # Streamlit UI
 # ============================================================
-def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
+def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
     st.subheader("📈 장전 주식 분석 시스템")
     _init_stock_cache()
 
@@ -491,16 +668,38 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
         st.error("FinanceDataReader가 설치되어 있지 않습니다. requirements.txt에 `finance-datareader`를 추가하세요.")
         return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
 
+    newsapi_key = get_secret_or_env("NEWSAPI_KEY")
+
     top = st.columns([1.2, 1.2, 1, 1])
 
     with top[0]:
-        mode = st.selectbox("분석 방식", ["대표 종목", "직접 입력"], index=0, key="stock_mode")
+        markets = st.multiselect(
+            "분석 시장",
+            ["KOSPI", "KOSDAQ"],
+            default=["KOSPI", "KOSDAQ"],
+            key="stock_markets",
+        )
 
     with top[1]:
-        markets = st.multiselect("분석 시장", ["KOSPI", "KOSDAQ"], default=["KOSPI", "KOSDAQ"], key="stock_markets")
+        target_count = st.number_input(
+            "분석 대상 종목 수",
+            min_value=10,
+            max_value=len(DEFAULT_STOCKS),
+            value=min(30, len(DEFAULT_STOCKS)),
+            step=5,
+            key="stock_target_count",
+            help="현재는 주요 관심 종목 풀에서 앞쪽 N개를 분석합니다.",
+        )
 
     with top[2]:
-        top_n = st.number_input("표시 종목 수", min_value=3, max_value=30, value=10, step=1, key="stock_top_n")
+        top_n = st.number_input(
+            "TOP 종목 수",
+            min_value=5,
+            max_value=20,
+            value=10,
+            step=5,
+            key="stock_top_n",
+        )
 
     with top[3]:
         if st.button("캐시 비우기", use_container_width=True, key="stock_clear_cache"):
@@ -508,30 +707,29 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
             st.success("Stock 캐시를 비웠습니다.")
             st.rerun()
 
-    opt = st.columns([1, 1, 1])
+    with st.expander("뉴스 설정", expanded=True):
+        use_news = st.checkbox("NewsAPI 뉴스 반영", value=True, key="stock_use_news")
 
-    with opt[0]:
-        min_trading_value_100m = st.number_input("최소 거래대금(억원)", min_value=1, max_value=5000, value=50, step=10, key="stock_min_trading_value_100m")
-
-    with opt[1]:
-        min_volume_ratio = st.slider("최소 거래량 배율", min_value=1.0, max_value=5.0, value=1.3, step=0.1, key="stock_min_volume_ratio")
-
-    with opt[2]:
-        use_global = st.checkbox("해외 지표 포함", value=True, key="stock_use_global")
-
-    custom_text = ""
-    if mode == "직접 입력":
-        custom_text = st.text_area(
-            "분석할 종목 입력",
-            value="005930 삼성전자\n000660 SK하이닉스\n035420 NAVER",
-            height=120,
-            key="stock_custom_text",
-            help="한 줄에 하나씩 입력하세요. 예: 005930 삼성전자",
+        news_query = st.text_area(
+            "뉴스 검색어",
+            value=DEFAULT_NEWS_QUERY,
+            height=90,
+            key="stock_news_query",
+            help="NewsAPI Everything 검색어입니다. OR를 사용해 여러 이슈를 묶을 수 있습니다.",
         )
 
+        n1, n2 = st.columns(2)
+        with n1:
+            news_limit = st.number_input("뉴스 수집 개수", min_value=5, max_value=50, value=20, step=5, key="stock_news_limit")
+        with n2:
+            news_days = st.number_input("뉴스 기간(일)", min_value=1, max_value=7, value=2, step=1, key="stock_news_days")
+
+        if use_news and not newsapi_key:
+            st.warning("NEWSAPI_KEY가 없습니다. 뉴스 반영 없이 가격·거래량 중심으로 분석합니다.")
+
     st.caption(
-        "이 버전은 FinanceDataReader 기반 안정화 버전입니다. 가격·거래량·거래대금 기준으로 장전 관심 종목을 선별합니다. "
-        "pykrx 기반 외국인·기관 수급 분석은 추후 KRX 인증 문제 해결 뒤 추가합니다."
+        "이번 버전은 전일 주가·거래량에 NewsAPI 뉴스 흐름을 더해 '오늘 매매 관심 종목'을 선별합니다. "
+        "투자 권유가 아니라 장전 체크리스트입니다."
     )
 
     do_run = st.button("장전 분석 실행", use_container_width=True, key="stock_run")
@@ -539,63 +737,103 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
     if not do_run:
         if st.session_state.stock_last_info:
             st.success(st.session_state.stock_last_info)
+
             if st.session_state.stock_last_indicators:
                 with st.expander("해외시장 참고 지표", expanded=False):
                     st.dataframe(pd.DataFrame(st.session_state.stock_last_indicators), use_container_width=True, hide_index=True)
-            if not st.session_state.stock_last_up_df.empty:
-                with st.expander("상승 관심 종목 미리보기", expanded=True):
-                    st.dataframe(st.session_state.stock_last_up_df, use_container_width=True, hide_index=True)
-            if not st.session_state.stock_last_down_df.empty:
-                with st.expander("하락 주의 종목 미리보기", expanded=True):
-                    st.dataframe(st.session_state.stock_last_down_df, use_container_width=True, hide_index=True)
+
+            if not st.session_state.stock_last_news_df.empty:
+                with st.expander("수집 뉴스 미리보기", expanded=False):
+                    st.dataframe(st.session_state.stock_last_news_df, use_container_width=True, hide_index=True)
+
+            if not st.session_state.stock_last_candidates_df.empty:
+                with st.expander("매매 관심 종목", expanded=True):
+                    st.dataframe(st.session_state.stock_last_candidates_df, use_container_width=True, hide_index=True)
+
+            if not st.session_state.stock_last_risks_df.empty:
+                with st.expander("주의 종목", expanded=True):
+                    st.dataframe(st.session_state.stock_last_risks_df, use_container_width=True, hide_index=True)
+
         return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
 
     try:
-        targets = get_target_tickers(markets, mode, custom_text)
-        target_count = sum(len(v) for v in targets.values())
+        selected_stocks = [x for x in DEFAULT_STOCKS if not markets or x[2] in markets]
+        selected_stocks = selected_stocks[: int(target_count)]
 
-        if target_count == 0:
-            st.error("분석할 종목이 없습니다. 시장을 선택하거나 직접 종목을 입력하세요.")
-            return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
+        indicators: List[Dict[str, Any]] = []
+        news_items: List[NewsItem] = []
 
-        items: List[Dict] = []
+        with st.spinner("해외시장 참고 지표를 수집 중입니다..."):
+            indicators = fetch_global_indicators()
+
+        if use_news and newsapi_key and news_query.strip():
+            with st.spinner("NewsAPI로 장전 뉴스를 수집 중입니다..."):
+                try:
+                    news_items = fetch_newsapi_items(newsapi_key, news_query, limit=int(news_limit), days_back=int(news_days))
+                except Exception as e:
+                    st.warning(f"NewsAPI 수집 실패: {e}")
+                    news_items = []
+
+        rows: List[Dict[str, Any]] = []
+        latest_dates: List[str] = []
+
         progress = st.progress(0)
-        done = 0
+        status = st.empty()
 
-        with st.spinner("FinanceDataReader로 종목 가격·거래량 데이터를 수집 중입니다..."):
-            for market, ticker_map in targets.items():
-                for ticker, name in ticker_map.items():
-                    item = analyze_one_stock(ticker, name, market)
-                    if item:
-                        items.append(item)
-                    done += 1
-                    progress.progress(min(done / target_count, 1.0))
+        for i, (ticker, name, market) in enumerate(selected_stocks, start=1):
+            status.caption(f"분석 중: {name}({ticker}) {i}/{len(selected_stocks)}")
+            row = analyze_one_stock(ticker, name, market, news_items)
+            if row:
+                rows.append(row)
+                if row.get("date"):
+                    latest_dates.append(str(row.get("date")))
+            progress.progress(i / max(len(selected_stocks), 1))
 
+        status.empty()
         progress.empty()
 
-        if not items:
-            st.error("분석 가능한 종목 데이터를 가져오지 못했습니다. 네트워크 상태나 종목코드를 확인하세요.")
+        if not rows:
+            st.error("분석 가능한 종목 데이터가 없습니다. FinanceDataReader 연결 상태를 확인하세요.")
             return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
 
-        min_trading_value = int(min_trading_value_100m) * 100_000_000
-        up_picks, down_picks = score_items(items, min_trading_value, float(min_volume_ratio), int(top_n))
+        latest_date = max(latest_dates) if latest_dates else _today_str()
+        candidates, risks = score_candidates(rows, top_n=int(top_n))
 
-        indicators: List[Dict] = []
-        if use_global:
-            with st.spinner("해외 참고 지표를 확인 중입니다..."):
-                indicators = fetch_global_indicators()
+        ws_text = build_workspace_text(
+            latest_date=latest_date,
+            markets=markets,
+            target_count=len(selected_stocks),
+            candidates=candidates,
+            risks=risks,
+            indicators=indicators,
+            news_items=news_items,
+            news_query=news_query,
+        )
 
-        ws_text = build_workspace_text(markets, up_picks, down_picks, indicators, target_count)
-        buffer_items = build_buffer_items(ws_text, up_picks, down_picks, indicators)
-        up_df = picks_to_dataframe(up_picks)
-        down_df = picks_to_dataframe(down_picks)
+        buffer_items = build_buffer_items(
+            ws_text=ws_text,
+            latest_date=latest_date,
+            markets=markets,
+            candidates=candidates,
+            risks=risks,
+            indicators=indicators,
+            news_items=news_items,
+        )
+
+        candidates_df = picks_to_dataframe(candidates)
+        risks_df = picks_to_dataframe(risks)
+        news_df = news_to_dataframe(news_items)
 
         st.session_state.stock_last_ws_text = ws_text
         st.session_state.stock_last_buffer = buffer_items
-        st.session_state.stock_last_up_df = up_df
-        st.session_state.stock_last_down_df = down_df
+        st.session_state.stock_last_candidates_df = candidates_df
+        st.session_state.stock_last_risks_df = risks_df
+        st.session_state.stock_last_news_df = news_df
         st.session_state.stock_last_indicators = indicators
-        st.session_state.stock_last_info = f"장전 주식 분석 완료: 분석 대상 {target_count}개 / 상승 관심 {len(up_picks)}개 / 하락 주의 {len(down_picks)}개 / 생성 {_now_iso()}"
+        st.session_state.stock_last_info = (
+            f"장전 주식 분석 완료: 가격 기준일 {latest_date} / "
+            f"매매 관심 {len(candidates)}개 / 주의 {len(risks)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
+        )
 
         st.success(st.session_state.stock_last_info)
 
@@ -603,22 +841,27 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
             with st.expander("해외시장 참고 지표", expanded=True):
                 st.dataframe(pd.DataFrame(indicators), use_container_width=True, hide_index=True)
 
+        if not news_df.empty:
+            with st.expander("수집 뉴스", expanded=True):
+                st.dataframe(news_df, use_container_width=True, hide_index=True)
+
         c1, c2 = st.columns(2)
         with c1:
-            st.markdown("### 상승 관심 종목")
-            if up_df.empty:
-                st.info("조건에 맞는 상승 관심 종목이 없습니다.")
+            st.markdown("### 오늘 매매 관심 종목")
+            if candidates_df.empty:
+                st.info("조건에 맞는 매매 관심 종목이 없습니다.")
             else:
-                st.dataframe(up_df, use_container_width=True, hide_index=True)
+                st.dataframe(candidates_df, use_container_width=True, hide_index=True)
+
         with c2:
-            st.markdown("### 하락 주의 종목")
-            if down_df.empty:
-                st.info("조건에 맞는 하락 주의 종목이 없습니다.")
+            st.markdown("### 오늘 주의 종목")
+            if risks_df.empty:
+                st.info("조건에 맞는 주의 종목이 없습니다.")
             else:
-                st.dataframe(down_df, use_container_width=True, hide_index=True)
+                st.dataframe(risks_df, use_container_width=True, hide_index=True)
 
         with st.expander("Workspace 반영용 텍스트 미리보기", expanded=False):
-            st.text_area("분석 결과", value=ws_text, height=360, disabled=True, key="stock_ws_preview")
+            st.text_area("분석 결과", value=ws_text, height=420, disabled=True, key="stock_ws_preview")
 
         return ws_text, buffer_items
 
@@ -627,9 +870,9 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict]]:
             "장전 주식 분석 실패:\n"
             f"- {e}\n\n"
             "체크 포인트:\n"
-            "- requirements.txt에 finance-datareader가 들어 있는지 확인\n"
-            "- 로컬에서 `python -c \"import FinanceDataReader as fdr; print('OK')\"` 확인\n"
-            "- 네트워크 또는 FinanceDataReader 데이터 소스 장애 여부 확인\n"
-            "- 종목코드가 6자리인지 확인"
+            "- requirements.txt에 finance-datareader, pandas<3가 있는지 확인\n"
+            "- Streamlit Cloud에서 앱을 Reboot했는지 확인\n"
+            "- NEWSAPI_KEY가 Streamlit Secrets에 저장되어 있는지 확인\n"
+            "- FinanceDataReader 데이터 호출이 일시적으로 실패할 수 있음"
         )
         return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
