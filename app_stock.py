@@ -1283,7 +1283,6 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             indicators=indicators,
             news_items=news_items,
             ai_brief=ai_brief,
-            sector_results=sector_results,
         )
 
         candidates_df = picks_to_dataframe(candidates)
