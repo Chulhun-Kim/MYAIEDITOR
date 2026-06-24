@@ -97,45 +97,40 @@ DEFAULT_STOCKS: List[Tuple[str, str, str]] = [
     ("055550", "신한지주", "KOSPI"),
 ]
 
-# 섹터 분석용 매핑
-# - keywords: 뉴스/거시지표 문장에서 섹터를 감지할 키워드
-# - stocks: 해당 섹터와 연결할 대표 종목명
-SECTOR_MAP: Dict[str, Dict[str, List[str]]] = {
+SECTOR_MAP: Dict[str, Dict[str, Any]] = {
     "반도체·AI": {
-        "keywords": ["반도체", "AI", "엔비디아", "HBM", "GPU", "데이터센터", "AI서버", "메모리"],
-        "stocks": ["삼성전자", "SK하이닉스", "한미반도체", "ISC", "리노공업", "원익IPS", "주성엔지니어링", "LX세미콘"],
+        "keywords": ["반도체", "AI", "엔비디아", "HBM", "삼성전자", "SK하이닉스"],
+        "stocks": ["삼성전자", "SK하이닉스", "한미반도체", "리노공업", "ISC", "원익IPS"],
     },
-    "2차전지·전기차": {
-        "keywords": ["2차전지", "전기차", "배터리", "테슬라", "양극재", "리튬", "ESS"],
+    "2차전지": {
+        "keywords": ["2차전지", "배터리", "전기차", "테슬라", "리튬"],
         "stocks": ["LG에너지솔루션", "삼성SDI", "에코프로비엠", "에코프로", "포스코퓨처엠", "LG화학"],
     },
     "방산": {
-        "keywords": ["방산", "국방", "무기", "수출", "NATO", "전쟁", "미사일", "수주"],
+        "keywords": ["방산", "국방", "무기", "수출", "NATO"],
         "stocks": ["한화에어로스페이스", "LIG넥스원", "현대로템"],
     },
     "조선": {
-        "keywords": ["조선", "선박", "LNG", "수주", "해양플랜트", "운임"],
+        "keywords": ["조선", "선박", "LNG", "수주"],
         "stocks": ["HD현대중공업", "삼성중공업", "HD한국조선해양"],
     },
-    "원전·전력": {
-        "keywords": ["원전", "SMR", "전력", "전력망", "전기", "에너지", "체코", "원자력"],
+    "원전": {
+        "keywords": ["원전", "SMR", "원자력", "전력"],
         "stocks": ["두산에너빌리티", "한전기술"],
     },
     "자동차": {
-        "keywords": ["자동차", "전기차", "하이브리드", "수출", "현대차", "기아", "관세"],
+        "keywords": ["자동차", "전기차", "현대차", "기아"],
         "stocks": ["현대차", "기아"],
     },
     "바이오": {
-        "keywords": ["바이오", "의약품", "임상", "FDA", "헬스케어", "치료제", "위탁생산"],
+        "keywords": ["바이오", "의약품", "FDA", "임상"],
         "stocks": ["셀트리온", "삼성바이오로직스"],
     },
     "금융": {
-        "keywords": ["금리", "은행", "배당", "자사주", "주주환원", "금융", "환율"],
+        "keywords": ["금리", "은행", "금융", "배당"],
         "stocks": ["KB금융", "신한지주"],
     },
 }
-
-
 
 @dataclass
 class StockPick:
@@ -161,16 +156,6 @@ class NewsItem:
     source: str
     description: str
     content: str
-
-
-@dataclass
-class SectorPick:
-    sector: str
-    score: float
-    news_hits: int
-    macro_hits: int
-    related_stocks: List[str]
-    reasons: List[str]
 
 
 # ============================================================
@@ -425,6 +410,95 @@ def count_news_hits(name: str, ticker: str, news_items: List[NewsItem]) -> int:
             count += 1
     return count
 
+def analyze_sectors(
+    indicators: List[Dict[str, Any]],
+    news_items: List[NewsItem],
+) -> List[Dict[str, Any]]:
+    """
+    뉴스 + 해외지표를 바탕으로 강세 예상 섹터를 추출
+    """
+
+    text_parts: List[str] = []
+
+    # 뉴스 본문 결합
+    for n in news_items:
+        text_parts.append(
+            f"{n.title} {n.description} {n.content}"
+        )
+
+    # 해외지표 설명 결합
+    for it in indicators:
+        text_parts.append(
+            f"{it.get('name', '')} "
+            f"{it.get('symbol', '')} "
+            f"{it.get('memo', '')}"
+        )
+
+    text = " ".join(text_parts)
+
+    results: List[Dict[str, Any]] = []
+
+    for sector, info in SECTOR_MAP.items():
+
+        score = 0.0
+        matched: List[str] = []
+
+        # 뉴스 키워드 점수
+        for kw in info.get("keywords", []):
+
+            cnt = text.count(kw)
+
+            if cnt > 0:
+                score += cnt * 10
+                matched.append(f"{kw}({cnt})")
+
+        # 해외지표 보정
+        for it in indicators:
+
+            name = str(it.get("name", ""))
+            chg = _safe_float(it.get("change_rate"))
+
+            # 반도체·AI
+            if sector == "반도체·AI":
+                if name in ["엔비디아", "나스닥", "마이크로소프트"] and chg > 0:
+                    score += min(chg * 5, 20)
+
+            # 2차전지
+            elif sector == "2차전지":
+                if name == "테슬라" and chg > 0:
+                    score += min(chg * 5, 20)
+
+            # 자동차
+            elif sector == "자동차":
+                if name == "테슬라" and chg > 0:
+                    score += min(chg * 3, 15)
+
+            # 환율 수혜
+            if name == "달러/원" and chg > 0:
+                if sector in ["반도체·AI", "자동차", "조선"]:
+                    score += min(chg * 5, 15)
+
+            # 유가
+            if name == "WTI유가" and chg > 0:
+                if sector in ["조선", "방산"]:
+                    score += min(chg * 3, 10)
+
+        if score > 0:
+            results.append(
+                {
+                    "sector": sector,
+                    "score": round(score, 1),
+                    "matched": matched[:8],
+                    "stocks": info.get("stocks", []),
+                }
+            )
+
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return results[:5]
 
 def build_news_keywords_summary(news_items: List[NewsItem]) -> List[str]:
     keywords = [
@@ -562,112 +636,6 @@ def score_candidates(rows: List[Dict[str, Any]], top_n: int = 10) -> Tuple[List[
 
 
 # ============================================================
-# 섹터 분석
-# ============================================================
-def analyze_sectors(
-    news_items: List[NewsItem],
-    indicators: List[Dict[str, Any]],
-    candidates: List[StockPick],
-    top_n: int = 5,
-) -> List[SectorPick]:
-    """
-    뉴스·거시지표·시스템 후보 종목을 바탕으로 강세 예상 섹터를 점수화한다.
-    - 뉴스 키워드 반복: 섹터 관심도
-    - 거시지표 memo/name 반복: 장전 외부 변수
-    - 시스템 후보에 관련 종목 포함: 실제 종목 흐름 반영
-    """
-    news_text = " ".join(
-        [f"{n.title} {n.description} {n.content}" for n in news_items]
-    )
-    macro_text = " ".join(
-        [f"{it.get('name', '')} {it.get('symbol', '')} {it.get('memo', '')}" for it in indicators]
-    )
-    candidate_names = {p.name for p in candidates}
-
-    out: List[SectorPick] = []
-
-    for sector, config in SECTOR_MAP.items():
-        keywords = config.get("keywords", [])
-        related_stocks = config.get("stocks", [])
-
-        news_hits = 0
-        macro_hits = 0
-        reasons: List[str] = []
-
-        hit_keywords: List[str] = []
-        for kw in keywords:
-            n_count = news_text.count(kw)
-            m_count = macro_text.count(kw)
-            if n_count > 0:
-                news_hits += n_count
-                hit_keywords.append(f"{kw} 뉴스 {n_count}회")
-            if m_count > 0:
-                macro_hits += m_count
-
-        matched_stocks = [name for name in related_stocks if name in candidate_names]
-
-        score = 0.0
-        score += min(news_hits * 8.0, 48.0)
-        score += min(macro_hits * 10.0, 30.0)
-        score += min(len(matched_stocks) * 8.0, 32.0)
-
-        if hit_keywords:
-            reasons.append("주요 키워드 감지: " + ", ".join(hit_keywords[:5]))
-        if macro_hits > 0:
-            reasons.append(f"해외시장·거시지표 메모에서 관련 신호 {macro_hits}건")
-        if matched_stocks:
-            reasons.append("시스템 매매 관심 후보와 연결: " + ", ".join(matched_stocks[:6]))
-
-        # 기본 섹터라도 신호가 없으면 제외한다.
-        if score > 0:
-            out.append(
-                SectorPick(
-                    sector=sector,
-                    score=round(score, 1),
-                    news_hits=int(news_hits),
-                    macro_hits=int(macro_hits),
-                    related_stocks=related_stocks,
-                    reasons=reasons[:4] if reasons else ["뉴스·거시지표·종목 흐름상 점검 필요"],
-                )
-            )
-
-    out.sort(key=lambda x: x.score, reverse=True)
-    return out[: int(top_n)]
-
-
-def sectors_to_dataframe(sectors: List[SectorPick]) -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "섹터": s.sector,
-                "점수": s.score,
-                "뉴스신호": s.news_hits,
-                "거시신호": s.macro_hits,
-                "관련종목": ", ".join(s.related_stocks[:8]),
-                "근거": " / ".join(s.reasons),
-            }
-            for s in sectors
-        ]
-    )
-
-
-def build_sector_brief(sectors: List[SectorPick]) -> str:
-    if not sectors:
-        return "- 뚜렷한 강세 예상 섹터가 감지되지 않았습니다."
-
-    lines: List[str] = []
-    for i, s in enumerate(sectors, start=1):
-        lines.append(f"### {i}. {s.sector} / {s.score}점")
-        lines.append(f"- 뉴스 신호: {s.news_hits}건")
-        lines.append(f"- 거시 신호: {s.macro_hits}건")
-        lines.append(f"- 관련 종목: {', '.join(s.related_stocks[:8])}")
-        for r in s.reasons:
-            lines.append(f"- {r}")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-# ============================================================
 # OpenAI 장전 해석
 # ============================================================
 def build_ai_input_text(
@@ -675,30 +643,52 @@ def build_ai_input_text(
     markets: List[str],
     candidates: List[StockPick],
     risks: List[StockPick],
-    sectors: List[SectorPick],
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
 ) -> str:
+    """
+    OpenAI 장전 판단용 입력 자료를 구성한다.
+    핵심 개선점:
+    - 거시지표를 단순 참고가 아니라 '시장 영향'까지 함께 전달
+    - 뉴스 → 섹터 → 종목 연결 판단이 가능하도록 후보/주의 종목 근거를 구조화
+    """
     parts: List[str] = []
+
     parts.append(f"[브리핑 기준시각] {_today_str()} 07:00")
     parts.append(f"[국내시장 가격 기준일] {latest_date}")
     parts.append(f"[분석 시장] {', '.join(markets) if markets else '사용자 입력'}")
     parts.append("")
 
-    parts.append("[해외시장 참고 지표]")
+    parts.append("[해외시장·거시지표]")
     if indicators:
         for it in indicators:
+            name = it.get("name", "")
+            symbol = it.get("symbol", "")
+            last = _safe_float(it.get("last"))
+            change_rate = _safe_float(it.get("change_rate"))
+            date = it.get("date", "")
+            memo = it.get("memo", "")
+
             parts.append(
-                f"- {it.get('name')}({it.get('symbol')}): {it.get('last')}, "
-                f"전일 대비 {_fmt_pct(_safe_float(it.get('change_rate')))} / {it.get('date')}"
+                f"- {name}({symbol}): {last:.2f}, "
+                f"전일 대비 {_fmt_pct(change_rate)} / 기준일 {date} / 영향 변수: {memo}"
             )
     else:
         parts.append("- 없음")
     parts.append("")
 
+    parts.append("[거시지표 해석 가이드]")
+    parts.append("- 나스닥·S&P500 상승: 한국 성장주, 반도체, 인터넷, 2차전지 투자심리에 우호적일 수 있음")
+    parts.append("- 엔비디아 상승: 반도체, AI, HBM, 반도체 장비·소재 종목 관심 확대 가능성")
+    parts.append("- 테슬라 상승: 2차전지, 전기차, 자동차 밸류체인 관심 확대 가능성")
+    parts.append("- 달러/원 상승: 수출주에는 일부 우호적일 수 있으나 외국인 수급에는 부담이 될 수 있음")
+    parts.append("- 유가 상승: 정유·조선·에너지에는 우호적일 수 있고 항공·화학에는 비용 부담 요인이 될 수 있음")
+    parts.append("- 미국 기술주 약세 또는 금리 부담: 성장주·바이오·2차전지에는 부담 요인이 될 수 있음")
+    parts.append("")
+
     parts.append("[장전 주요 뉴스]")
     if news_items:
-        for i, n in enumerate(news_items[:12], start=1):
+        for i, n in enumerate(news_items[:15], start=1):
             parts.append(f"- {i}. {n.title} / {n.source} / {n.published}")
             if n.description:
                 parts.append(f"  요약: {n.description}")
@@ -706,29 +696,14 @@ def build_ai_input_text(
         parts.append("- 없음")
     parts.append("")
 
-    parts.append("[강세 예상 섹터]")
-    if sectors:
-        for i, s in enumerate(sectors, start=1):
-            parts.append(
-                f"- {i}. {s.sector} / 점수 {s.score} / "
-                f"뉴스신호 {s.news_hits}건 / 거시신호 {s.macro_hits}건 / "
-                f"관련종목: {', '.join(s.related_stocks[:8])} / "
-                f"근거: {'; '.join(s.reasons)}"
-            )
-    else:
-        parts.append("- 없음")
-    parts.append("")
-
     parts.append("[시스템 점수 기반 매매 관심 후보]")
-    if sectors:
-        sector_names = ", ".join([f"{s.sector}({s.score}점)" for s in sectors[:5]])
-        lines.append(f"- 강세 예상 섹터는 {sector_names}입니다.")
-
     if candidates:
         for i, p in enumerate(candidates, start=1):
             parts.append(
                 f"- {i}. {p.name}({p.ticker}) {p.market} / 점수 {p.score} / "
-                f"등락률 {_fmt_pct(p.change_rate)} / 거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"직전 거래일 등락률 {_fmt_pct(p.change_rate)} / "
+                f"거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"추정거래대금 {_fmt_num(p.trading_value_est)}원 / "
                 f"뉴스언급 {p.news_hits}건 / 근거: {'; '.join(p.reasons)}"
             )
     else:
@@ -740,7 +715,9 @@ def build_ai_input_text(
         for i, p in enumerate(risks, start=1):
             parts.append(
                 f"- {i}. {p.name}({p.ticker}) {p.market} / 점수 {p.score} / "
-                f"등락률 {_fmt_pct(p.change_rate)} / 거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"직전 거래일 등락률 {_fmt_pct(p.change_rate)} / "
+                f"거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"추정거래대금 {_fmt_num(p.trading_value_est)}원 / "
                 f"근거: {'; '.join(p.reasons)}"
             )
     else:
@@ -748,8 +725,7 @@ def build_ai_input_text(
 
     return "\n".join(parts).strip()
 
-
-def rule_based_ai_brief(candidates: List[StockPick], risks: List[StockPick], sectors: List[SectorPick], news_items: List[NewsItem]) -> str:
+def rule_based_ai_brief(candidates: List[StockPick], risks: List[StockPick], news_items: List[NewsItem]) -> str:
     lines: List[str] = []
     lines.append("- OpenAI 분석을 사용할 수 없어 규칙 기반 요약으로 대체했습니다.")
 
@@ -777,7 +753,6 @@ def generate_ai_preopen_brief(
     markets: List[str],
     candidates: List[StockPick],
     risks: List[StockPick],
-    sectors: List[SectorPick],
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
     model: str,
@@ -786,7 +761,7 @@ def generate_ai_preopen_brief(
     api_key = get_secret_or_env("OPENAI_API_KEY")
 
     if not HAS_OPENAI or not api_key:
-        return rule_based_ai_brief(candidates, risks, sectors, news_items)
+        return rule_based_ai_brief(candidates, risks, news_items)
 
     client = OpenAI(api_key=api_key)
     input_text = build_ai_input_text(
@@ -794,7 +769,6 @@ def generate_ai_preopen_brief(
         markets=markets,
         candidates=candidates,
         risks=risks,
-        sectors=sectors,
         indicators=indicators,
         news_items=news_items,
     )
@@ -802,18 +776,49 @@ def generate_ai_preopen_brief(
     system_prompt = """당신은 한국 주식시장 장전 브리핑을 작성하는 데이터 분석가다.
 반드시 제공된 데이터 안에서만 판단하고, 확인되지 않은 사실은 단정하지 않는다.
 투자 권유처럼 쓰지 말고, 장전 체크리스트와 매매 후보 검토 자료로 작성한다.
-먼저 섹터를 판단한 뒤, 섹터와 종목 후보를 연결해서 쓴다.
-종목을 제시할 때는 이유와 확인 조건을 함께 쓴다."""
+분석 순서는 반드시 '거시지표 → 섹터 → 종목 → 장 시작 후 확인 조건'으로 구성한다.
+단순히 시스템 점수가 높은 종목을 나열하지 말고, 해외시장·환율·유가·뉴스 흐름과 연결되는 종목을 우선한다.
+종목을 제시할 때는 매수 단정 표현을 피하고 '관심', '점검', '확인', '주의' 표현을 사용한다."""
 
     user_prompt = f"""아래 데이터를 바탕으로 한국시간 오전 7시 기준 장전 브리핑을 작성하라.
 
+[분석 지침]
+1. 해외시장·거시지표를 가장 먼저 해석하라.
+2. 거시지표가 한국 증시 섹터에 미칠 수 있는 영향을 연결하라.
+3. 뉴스 흐름과 시스템 점수 후보가 동시에 맞물리는 종목을 우선순위로 제시하라.
+4. 매매 후보는 '오늘 매매 후보 TOP 5'로 정리하되, 장 시작 후 확인 조건을 반드시 붙여라.
+5. 주의 종목은 급등 부담, 급락, 거래량 급증, 뉴스 불확실성 관점에서 정리하라.
+6. 확인되지 않은 사실을 새로 만들지 말고, 제공된 데이터 안에서만 판단하라.
+
 [출력 형식]
-- 오늘 시장 방향성 3~5줄
-- 강세 예상 섹터 TOP 5: 섹터명, 근거, 연결 종목
-- 오늘 매매 후보 TOP 5: 종목명, 연결 섹터, 근거, 장 시작 후 확인 조건
-- 오늘 주의 종목: 종목명, 주의 이유
-- 장 시작 후 체크포인트 5개
-- 마지막 줄에는 '투자 권유가 아닌 참고용 분석'이라고 명기
+
+## ⑥ AI 장전 판단
+
+### 1. 오늘 시장환경 해석
+- 해외시장, 환율, 유가, 주요 미국 종목 흐름을 종합해 3~5개 불릿으로 정리
+
+### 2. 강세 가능 섹터
+- 1순위: 섹터명 / 근거
+- 2순위: 섹터명 / 근거
+- 3순위: 섹터명 / 근거
+
+### 3. 오늘 매매 후보 TOP 5
+1. 종목명(종목코드)
+   - 판단:
+   - 근거:
+   - 장 시작 후 확인 조건:
+
+### 4. 오늘 주의 종목
+- 종목명(종목코드): 주의 이유
+
+### 5. 장 시작 후 체크포인트
+- 시초가 갭
+- 첫 10~30분 거래량
+- 전일 고점 돌파 여부
+- 환율·외국인 수급
+- 관련 뉴스 추가 여부
+
+마지막 줄에는 반드시 '투자 권유가 아닌 참고용 분석'이라고 명기하라.
 
 [데이터]
 {input_text}
@@ -832,7 +837,7 @@ def generate_ai_preopen_brief(
     except Exception as e:
         return (
             f"- OpenAI 분석 생성에 실패해 규칙 기반 요약으로 대체했습니다. 오류: {e}\n"
-            + rule_based_ai_brief(candidates, risks, sectors, news_items)
+            + rule_based_ai_brief(candidates, risks, news_items)
         )
 
 # ============================================================
@@ -920,11 +925,11 @@ def build_workspace_text(
     target_count: int,
     candidates: List[StockPick],
     risks: List[StockPick],
-    sectors: List[SectorPick],
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
     news_query: str,
     ai_brief: str = "",
+    sector_results: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     today = _today_str()
 
@@ -947,9 +952,22 @@ def build_workspace_text(
     lines.append(build_news_brief(news_items))
     lines.append("")
 
-    lines.append("## ③ 강세 예상 섹터 TOP")
-    lines.append(build_sector_brief(sectors))
-    lines.append("")
+    lines.append("## ③ 강세 예상 섹터 TOP5")
+    if not sector_results:
+        lines.append("- 뚜렷하게 감지된 강세 예상 섹터가 없습니다.")
+    else:
+        for i, s in enumerate(sector_results, start=1):
+            lines.append(f"### {i}. {s.get('sector')} / {s.get('score')}점")
+
+            matched = s.get("matched") or []
+            stocks = s.get("stocks") or []
+
+            if matched:
+                lines.append(f"- 감지 키워드: {', '.join(matched)}")
+            if stocks:
+                lines.append(f"- 관련 종목: {', '.join(stocks)}")
+
+            lines.append("")
 
     lines.append("## ④ 오늘 매매 관심 종목 TOP")
     if not candidates:
@@ -995,14 +1013,12 @@ def build_workspace_text(
 
     return "\n".join(lines).strip() + "\n"
 
-
 def build_buffer_items(
     ws_text: str,
     latest_date: str,
     markets: List[str],
     candidates: List[StockPick],
     risks: List[StockPick],
-    sectors: List[SectorPick],
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
     ai_brief: str = "",
@@ -1019,15 +1035,12 @@ def build_buffer_items(
                 "markets": markets,
                 "candidate_count": len(candidates),
                 "risk_count": len(risks),
-                "sector_count": len(sectors),
-                "sectors": [asdict(s) for s in sectors],
                 "indicators": indicators,
                 "news_count": len(news_items),
                 "ai_brief": ai_brief,
                 "raw": {
                     "candidates": [asdict(p) for p in candidates],
                     "risks": [asdict(p) for p in risks],
-                    "sectors": [asdict(sec) for sec in sectors],
                     "news": [asdict(n) for n in news_items],
                 },
             },
@@ -1045,7 +1058,6 @@ def _init_stock_cache() -> None:
         "stock_last_info": "",
         "stock_last_candidates_df": pd.DataFrame(),
         "stock_last_risks_df": pd.DataFrame(),
-        "stock_last_sectors_df": pd.DataFrame(),
         "stock_last_news_df": pd.DataFrame(),
         "stock_last_indicators": [],
         "stock_last_ai_brief": "",
@@ -1061,7 +1073,6 @@ def clear_stock_cache() -> None:
     st.session_state.stock_last_info = ""
     st.session_state.stock_last_candidates_df = pd.DataFrame()
     st.session_state.stock_last_risks_df = pd.DataFrame()
-    st.session_state.stock_last_sectors_df = pd.DataFrame()
     st.session_state.stock_last_news_df = pd.DataFrame()
     st.session_state.stock_last_indicators = []
     st.session_state.stock_last_ai_brief = ""
@@ -1175,10 +1186,6 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 with st.expander("수집 뉴스 미리보기", expanded=False):
                     st.dataframe(st.session_state.stock_last_news_df, use_container_width=True, hide_index=True)
 
-            if not st.session_state.get("stock_last_sectors_df", pd.DataFrame()).empty:
-                with st.expander("강세 예상 섹터", expanded=True):
-                    st.dataframe(st.session_state.stock_last_sectors_df, use_container_width=True, hide_index=True)
-
             if not st.session_state.stock_last_candidates_df.empty:
                 with st.expander("매매 관심 종목", expanded=True):
                     st.dataframe(st.session_state.stock_last_candidates_df, use_container_width=True, hide_index=True)
@@ -1235,12 +1242,11 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
         latest_date = max(latest_dates) if latest_dates else _today_str()
         candidates, risks = score_candidates(rows, top_n=int(top_n))
-        sectors = analyze_sectors(
-            news_items=news_items,
-            indicators=indicators,
-            candidates=candidates,
-            top_n=5,
-        )
+
+        sector_results = analyze_sectors(
+                indicators,
+                news_items
+        )   
 
         ai_brief = ""
         if use_ai:
@@ -1250,7 +1256,6 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     markets=markets,
                     candidates=candidates,
                     risks=risks,
-                    sectors=sectors,
                     indicators=indicators,
                     news_items=news_items,
                     model=ai_model,
@@ -1263,7 +1268,6 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             target_count=len(selected_stocks),
             candidates=candidates,
             risks=risks,
-            sectors=sectors,
             indicators=indicators,
             news_items=news_items,
             news_query=news_query,
@@ -1276,28 +1280,26 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             markets=markets,
             candidates=candidates,
             risks=risks,
-            sectors=sectors,
             indicators=indicators,
             news_items=news_items,
             ai_brief=ai_brief,
+            sector_results=sector_results,
         )
 
         candidates_df = picks_to_dataframe(candidates)
         risks_df = picks_to_dataframe(risks)
-        sectors_df = sectors_to_dataframe(sectors)
         news_df = news_to_dataframe(news_items)
 
         st.session_state.stock_last_ws_text = ws_text
         st.session_state.stock_last_buffer = buffer_items
         st.session_state.stock_last_candidates_df = candidates_df
         st.session_state.stock_last_risks_df = risks_df
-        st.session_state.stock_last_sectors_df = sectors_df
         st.session_state.stock_last_news_df = news_df
         st.session_state.stock_last_indicators = indicators
         st.session_state.stock_last_ai_brief = ai_brief
         st.session_state.stock_last_info = (
             f"장전 주식 분석 완료: 가격 기준일 {latest_date} / "
-            f"강세 섹터 {len(sectors)}개 / 매매 관심 {len(candidates)}개 / 주의 {len(risks)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
+            f"매매 관심 {len(candidates)}개 / 주의 {len(risks)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
         )
 
         st.success(st.session_state.stock_last_info)
@@ -1309,10 +1311,6 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         if not news_df.empty:
             with st.expander("수집 뉴스", expanded=True):
                 st.dataframe(news_df, use_container_width=True, hide_index=True)
-
-        if not sectors_df.empty:
-            with st.expander("강세 예상 섹터", expanded=True):
-                st.dataframe(sectors_df, use_container_width=True, hide_index=True)
 
         c1, c2 = st.columns(2)
         with c1:
