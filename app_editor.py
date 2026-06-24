@@ -1,5 +1,6 @@
 # app_editor.py
 # ------------------------------------------------------------
+# streamlit cloud 용(api key 관련 코드 수정)
 # AI 취재·정리 작업판 - 통합형
 # - Text/File: Workspace 중심
 # - RSS/NewsAPI: Buffer 중심
@@ -31,6 +32,7 @@ from app_text import render_text_panel
 from app_file import render_file_uploader
 from app_rss import render_rss_panel
 from app_newsapi import render_newsapi_panel
+from app_stock import render_stock_panel
 
 try:
     from openai import OpenAI
@@ -873,7 +875,7 @@ with st.sidebar:
 # ⓪ 수집 패널
 # ============================================================
 with st.expander("⓪ 수집 패널 열기", expanded=False):
-    tabs = st.tabs(["Text", "File", "RSS", "NewsAPI"])
+    tabs = st.tabs(["Text", "File", "RSS", "NewsAPI", "Stock"])
 
     with tabs[0]:
         st.subheader("Text 입력")
@@ -953,6 +955,28 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
             key_prefix="newsapi",
             set_mode="버퍼 항목별",
             after_hint="NewsAPI를 Buffer로 반영했습니다. 버퍼 항목별 생성이 기본입니다.",
+        )
+
+
+    with tabs[4]:
+        st.subheader("장전 주식 분석")
+        panel_result = render_stock_panel()
+
+        if isinstance(panel_result, tuple):
+            ws_text = panel_result[0] if len(panel_result) > 0 else ""
+            buf_items = panel_result[1] if len(panel_result) > 1 else []
+        else:
+            ws_text = panel_result
+            buf_items = panel_result
+
+        st.divider()
+
+        commit_controls(
+            ws_text,
+            buf_items,
+            key_prefix="stock",
+            set_mode="Workspace 기반",
+            after_hint="장전 주식 분석 결과를 Workspace/Buffer에 반영했습니다. Workspace 기반으로 Draft를 생성하세요.",
         )
 
 
