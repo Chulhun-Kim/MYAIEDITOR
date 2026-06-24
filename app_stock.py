@@ -380,17 +380,18 @@ def build_workspace_text(markets: List[str], up_picks: List[StockPick], down_pic
     dates = sorted({p.date for p in up_picks + down_picks})
     latest_date = dates[-1] if dates else dt.date.today().isoformat()
 
+    today = dt.date.today().strftime("%Y-%m-%d")
+
     lines: List[str] = []
     lines.append("# 장전 주식 분석")
-    lines.append(f"- 생성시각: {_now_iso()}")
-    lines.append(f"- 가격 기준일: {latest_date}")
+    lines.append(f"- 브리핑 기준시각: {today} 07:00")
+    lines.append(f"- 국내시장 가격 기준일: {latest_date}")
+    lines.append(f"- 실제 분석시각: {_now_iso()}")
     lines.append(f"- 분석 시장: {', '.join(markets) if markets else '사용자 입력'}")
     lines.append(f"- 분석 대상 종목 수: {target_count}개")
     lines.append("- 데이터 소스: FinanceDataReader")
     lines.append("")
-    lines.append("## 해외시장 참고 지표")
-    lines.append(build_market_brief(indicators))
-    lines.append("")
+
     lines.append("## 상승 관심 종목")
     if not up_picks:
         lines.append("- 조건에 맞는 상승 관심 종목이 없습니다.")
