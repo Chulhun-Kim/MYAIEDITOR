@@ -4,6 +4,6 @@ python-dotenv
 requests 
 feedparser 
 pypdf
-
+pandas<3
 pykrx 
 finance-datareader
