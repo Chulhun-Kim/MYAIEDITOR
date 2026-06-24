@@ -446,7 +446,7 @@ def fetch_global_indicators(days: int = 10) -> List[Dict[str, Any]]:
 # ============================================================
 # NewsAPI
 # ============================================================
-def fetch_newsapi_items(api_key: str, query: str, limit: int = 20, days_back: int = 2) -> List[NewsItem]:
+def fetch_newsapi_items(api_key: str, query: str, limit: int = 30, days_back: int = 2) -> List[NewsItem]:
     if requests is None:
         raise RuntimeError("requests가 설치되어 있지 않습니다.")
 
@@ -1055,7 +1055,7 @@ def build_workspace_text(
     lines.append(f"- 국내시장 가격 기준일: {latest_date}")
     lines.append(f"- 실제 분석시각: {_now_iso()}")
     lines.append(f"- 분석 시장: {', '.join(markets) if markets else '사용자 입력'}")
-    lines.append(f"- 분석 대상 종목 수: {target_count}개")
+    lines.append(f"- 분석할 후보 종목 수: {target_count}개")
     lines.append("- 데이터 소스: FinanceDataReader + NewsAPI")
     lines.append(f"- 뉴스 검색어: {news_query}")
     lines.append("")
@@ -1223,7 +1223,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             "분석 대상 종목 수",
             min_value=10,
             max_value=len(DEFAULT_STOCKS),
-            value=min(30, len(DEFAULT_STOCKS)),
+            value=min(80, len(DEFAULT_STOCKS)),
             step=5,
             key="stock_target_count",
             help="현재는 주요 관심 종목 풀에서 앞쪽 N개를 분석합니다.",
