@@ -763,7 +763,6 @@ def rule_based_ai_brief(candidates: List[StockPick], risks: List[StockPick], new
     lines.append("- 이 내용은 투자 권유가 아니라 공개 데이터 기반 장전 체크리스트입니다.")
     return "\n".join(lines)
 
-
 def generate_ai_preopen_brief(
     latest_date: str,
     markets: List[str],
@@ -771,9 +770,11 @@ def generate_ai_preopen_brief(
     risks: List[StockPick],
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
+    sector_results: List[Dict[str, Any]],
     model: str,
     temperature: float = 0.2,
 ) -> str:
+        
     api_key = get_secret_or_env("OPENAI_API_KEY")
 
     if not HAS_OPENAI or not api_key:
@@ -787,6 +788,7 @@ def generate_ai_preopen_brief(
         risks=risks,
         indicators=indicators,
         news_items=news_items,
+        sector_results=sector_results,
     )
 
     system_prompt = """당신은 한국 주식시장 장전 브리핑을 작성하는 데이터 분석가다.
@@ -1281,10 +1283,11 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     risks=risks,
                     indicators=indicators,
                     news_items=news_items,
+                    sector_results=sector_results,
                     model=ai_model,
                     temperature=float(ai_temperature),
                 )
-
+                
         ws_text = build_workspace_text(
             latest_date=latest_date,
             markets=markets,
