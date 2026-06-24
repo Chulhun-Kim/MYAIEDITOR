@@ -11,6 +11,16 @@
 from __future__ import annotations
 
 from zoneinfo import ZoneInfo
+
+def now_kst() -> dt.datetime:
+    return dt.datetime.now(ZoneInfo("Asia/Seoul"))
+
+def now_kst_str() -> str:
+    return now_kst().strftime("%Y-%m-%d %H:%M:%S")
+
+def today_kst_str() -> str:
+    return now_kst().strftime("%Y-%m-%d")
+
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Tuple
 import datetime as dt
@@ -254,35 +264,59 @@ def fetch_global_indicators(days: int = 10) -> List[Dict[str, Any]]:
     if fdr is None:
         return []
 
-    end = _today_kst_date()
-    start = end - dt.timedelta(days=days + 5)
+    end = now_kst().date()
+    start = end - dt.timedelta(days=days + 7)
 
     candidates = [
-        ("나스닥", "IXIC"),
-        ("S&P500", "US500"),
-        ("다우존스", "DJI"),
-        ("달러/원", "USD/KRW"),
+        # 미국 주요 지수
+        ("나스닥", "IXIC", "미국 성장주·기술주 흐름"),
+        ("S&P500", "US500", "미국 전체 위험자산 선호도"),
+        ("다우존스", "DJI", "미국 대형 가치주 흐름"),
+
+        # 한국 장전 핵심 변수
+        ("달러/원", "USD/KRW", "환율·수출주·외국인 수급"),
+        ("WTI유가", "CL", "정유·화학·항공·물가 변수"),
+
+        # 주요 미국 종목
+        ("엔비디아", "NVDA", "반도체·AI·HBM"),
+        ("테슬라", "TSLA", "2차전지·전기차·자동차"),
+        ("애플", "AAPL", "IT 부품·소비재"),
+        ("마이크로소프트", "MSFT", "AI·클라우드"),
     ]
 
     out: List[Dict[str, Any]] = []
 
-    for name, symbol in candidates:
+    for name, symbol, memo in candidates:
         try:
             df = fdr.DataReader(symbol, start, end)
+
             if df is None or df.empty or "Close" not in df.columns:
                 continue
+
             df = df.dropna()
+
             if len(df) < 2:
                 continue
+
             last = float(df["Close"].iloc[-1])
             prev = float(df["Close"].iloc[-2])
             chg = (last - prev) / prev * 100 if prev else 0
-            out.append({"name": name, "symbol": symbol, "last": last, "change_rate": chg, "date": str(df.index[-1].date())})
+
+            out.append(
+                {
+                    "name": name,
+                    "symbol": symbol,
+                    "last": last,
+                    "change_rate": chg,
+                    "date": str(df.index[-1].date()),
+                    "memo": memo,
+                }
+            )
+
         except Exception:
             continue
 
     return out
-
 
 # ============================================================
 # NewsAPI
@@ -489,26 +523,49 @@ def build_ai_input_text(
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
 ) -> str:
+    """
+    OpenAI 장전 판단용 입력 자료를 구성한다.
+    핵심 개선점:
+    - 거시지표를 단순 참고가 아니라 '시장 영향'까지 함께 전달
+    - 뉴스 → 섹터 → 종목 연결 판단이 가능하도록 후보/주의 종목 근거를 구조화
+    """
     parts: List[str] = []
+
     parts.append(f"[브리핑 기준시각] {_today_str()} 07:00")
     parts.append(f"[국내시장 가격 기준일] {latest_date}")
     parts.append(f"[분석 시장] {', '.join(markets) if markets else '사용자 입력'}")
     parts.append("")
 
-    parts.append("[해외시장 참고 지표]")
+    parts.append("[해외시장·거시지표]")
     if indicators:
         for it in indicators:
+            name = it.get("name", "")
+            symbol = it.get("symbol", "")
+            last = _safe_float(it.get("last"))
+            change_rate = _safe_float(it.get("change_rate"))
+            date = it.get("date", "")
+            memo = it.get("memo", "")
+
             parts.append(
-                f"- {it.get('name')}({it.get('symbol')}): {it.get('last')}, "
-                f"전일 대비 {_fmt_pct(_safe_float(it.get('change_rate')))} / {it.get('date')}"
+                f"- {name}({symbol}): {last:.2f}, "
+                f"전일 대비 {_fmt_pct(change_rate)} / 기준일 {date} / 영향 변수: {memo}"
             )
     else:
         parts.append("- 없음")
     parts.append("")
 
+    parts.append("[거시지표 해석 가이드]")
+    parts.append("- 나스닥·S&P500 상승: 한국 성장주, 반도체, 인터넷, 2차전지 투자심리에 우호적일 수 있음")
+    parts.append("- 엔비디아 상승: 반도체, AI, HBM, 반도체 장비·소재 종목 관심 확대 가능성")
+    parts.append("- 테슬라 상승: 2차전지, 전기차, 자동차 밸류체인 관심 확대 가능성")
+    parts.append("- 달러/원 상승: 수출주에는 일부 우호적일 수 있으나 외국인 수급에는 부담이 될 수 있음")
+    parts.append("- 유가 상승: 정유·조선·에너지에는 우호적일 수 있고 항공·화학에는 비용 부담 요인이 될 수 있음")
+    parts.append("- 미국 기술주 약세 또는 금리 부담: 성장주·바이오·2차전지에는 부담 요인이 될 수 있음")
+    parts.append("")
+
     parts.append("[장전 주요 뉴스]")
     if news_items:
-        for i, n in enumerate(news_items[:12], start=1):
+        for i, n in enumerate(news_items[:15], start=1):
             parts.append(f"- {i}. {n.title} / {n.source} / {n.published}")
             if n.description:
                 parts.append(f"  요약: {n.description}")
@@ -521,7 +578,9 @@ def build_ai_input_text(
         for i, p in enumerate(candidates, start=1):
             parts.append(
                 f"- {i}. {p.name}({p.ticker}) {p.market} / 점수 {p.score} / "
-                f"등락률 {_fmt_pct(p.change_rate)} / 거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"직전 거래일 등락률 {_fmt_pct(p.change_rate)} / "
+                f"거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"추정거래대금 {_fmt_num(p.trading_value_est)}원 / "
                 f"뉴스언급 {p.news_hits}건 / 근거: {'; '.join(p.reasons)}"
             )
     else:
@@ -533,14 +592,15 @@ def build_ai_input_text(
         for i, p in enumerate(risks, start=1):
             parts.append(
                 f"- {i}. {p.name}({p.ticker}) {p.market} / 점수 {p.score} / "
-                f"등락률 {_fmt_pct(p.change_rate)} / 거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"직전 거래일 등락률 {_fmt_pct(p.change_rate)} / "
+                f"거래량배율 {_fmt_ratio(p.volume_ratio)} / "
+                f"추정거래대금 {_fmt_num(p.trading_value_est)}원 / "
                 f"근거: {'; '.join(p.reasons)}"
             )
     else:
         parts.append("- 없음")
 
     return "\n".join(parts).strip()
-
 
 def rule_based_ai_brief(candidates: List[StockPick], risks: List[StockPick], news_items: List[NewsItem]) -> str:
     lines: List[str] = []
@@ -593,16 +653,49 @@ def generate_ai_preopen_brief(
     system_prompt = """당신은 한국 주식시장 장전 브리핑을 작성하는 데이터 분석가다.
 반드시 제공된 데이터 안에서만 판단하고, 확인되지 않은 사실은 단정하지 않는다.
 투자 권유처럼 쓰지 말고, 장전 체크리스트와 매매 후보 검토 자료로 작성한다.
-종목을 제시할 때는 이유와 확인 조건을 함께 쓴다."""
+분석 순서는 반드시 '거시지표 → 섹터 → 종목 → 장 시작 후 확인 조건'으로 구성한다.
+단순히 시스템 점수가 높은 종목을 나열하지 말고, 해외시장·환율·유가·뉴스 흐름과 연결되는 종목을 우선한다.
+종목을 제시할 때는 매수 단정 표현을 피하고 '관심', '점검', '확인', '주의' 표현을 사용한다."""
 
     user_prompt = f"""아래 데이터를 바탕으로 한국시간 오전 7시 기준 장전 브리핑을 작성하라.
 
+[분석 지침]
+1. 해외시장·거시지표를 가장 먼저 해석하라.
+2. 거시지표가 한국 증시 섹터에 미칠 수 있는 영향을 연결하라.
+3. 뉴스 흐름과 시스템 점수 후보가 동시에 맞물리는 종목을 우선순위로 제시하라.
+4. 매매 후보는 '오늘 매매 후보 TOP 5'로 정리하되, 장 시작 후 확인 조건을 반드시 붙여라.
+5. 주의 종목은 급등 부담, 급락, 거래량 급증, 뉴스 불확실성 관점에서 정리하라.
+6. 확인되지 않은 사실을 새로 만들지 말고, 제공된 데이터 안에서만 판단하라.
+
 [출력 형식]
-- 오늘 시장 방향성 3~5줄
-- 오늘 매매 후보 TOP 5: 종목명, 근거, 장 시작 후 확인 조건
-- 오늘 주의 종목: 종목명, 주의 이유
-- 장 시작 후 체크포인트 5개
-- 마지막 줄에는 '투자 권유가 아닌 참고용 분석'이라고 명기
+
+## ⑥ AI 장전 판단
+
+### 1. 오늘 시장환경 해석
+- 해외시장, 환율, 유가, 주요 미국 종목 흐름을 종합해 3~5개 불릿으로 정리
+
+### 2. 강세 가능 섹터
+- 1순위: 섹터명 / 근거
+- 2순위: 섹터명 / 근거
+- 3순위: 섹터명 / 근거
+
+### 3. 오늘 매매 후보 TOP 5
+1. 종목명(종목코드)
+   - 판단:
+   - 근거:
+   - 장 시작 후 확인 조건:
+
+### 4. 오늘 주의 종목
+- 종목명(종목코드): 주의 이유
+
+### 5. 장 시작 후 체크포인트
+- 시초가 갭
+- 첫 10~30분 거래량
+- 전일 고점 돌파 여부
+- 환율·외국인 수급
+- 관련 뉴스 추가 여부
+
+마지막 줄에는 반드시 '투자 권유가 아닌 참고용 분석'이라고 명기하라.
 
 [데이터]
 {input_text}
@@ -667,11 +760,23 @@ def news_to_dataframe(news_items: List[NewsItem]) -> pd.DataFrame:
 def build_market_brief(indicators: List[Dict[str, Any]]) -> str:
     if not indicators:
         return "- 해외시장 참고 지표를 가져오지 못했습니다."
-    lines = []
-    for it in indicators:
-        lines.append(f"- {it['name']}({it['symbol']}): {it['last']:.2f}, 전일 대비 {_fmt_pct(it['change_rate'])} ({it['date']})")
-    return "\n".join(lines)
 
+    lines = []
+
+    for it in indicators:
+        memo = it.get("memo", "")
+        line = (
+            f"- {it['name']}({it['symbol']}): "
+            f"{it['last']:.2f}, 전일 대비 {_fmt_pct(it['change_rate'])} "
+            f"({it['date']})"
+        )
+
+        if memo:
+            line += f" / 영향: {memo}"
+
+        lines.append(line)
+
+    return "\n".join(lines)
 
 def build_news_brief(news_items: List[NewsItem]) -> str:
     if not news_items:
