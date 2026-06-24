@@ -1258,7 +1258,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
         n1, n2 = st.columns(2)
         with n1:
-            news_limit = st.number_input("뉴스 수집 개수", min_value=5, max_value=50, value=20, step=5, key="stock_news_limit")
+            news_limit = st.number_input("뉴스 수집 개수", min_value=5, max_value=50, value=30, step=5, key="stock_news_limit")
         with n2:
             news_days = st.number_input("뉴스 기간(일)", min_value=1, max_value=7, value=2, step=1, key="stock_news_days")
 
