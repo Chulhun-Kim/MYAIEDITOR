@@ -957,7 +957,6 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
             after_hint="NewsAPI를 Buffer로 반영했습니다. 버퍼 항목별 생성이 기본입니다.",
         )
 
-
     with tabs[4]:
         st.subheader("장전 주식 분석")
         panel_result = render_stock_panel()
@@ -979,9 +978,7 @@ with st.expander("⓪ 수집 패널 열기", expanded=False):
             after_hint="장전 주식 분석 결과를 Workspace/Buffer에 반영했습니다. Workspace 기반으로 Draft를 생성하세요.",
         )
 
-
 st.divider()
-
 
 # ============================================================
 # ① 자료 확인 패널

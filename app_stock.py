@@ -10,7 +10,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
+from stock.models import PremarketData
+from stock.dart_api import fetch_dart_disclosures, format_dart_section
+from stock.after_hours_collector import collect_after_hours_sample
+from stock.candidate_score import build_candidate_scores, CandidateScore
+from stock import sector_engine as se
+from stock import ai_prompt as aip
+from stock import workspace_builder as wb
+from stock import market_decision as md
+from stock import market_dashboard as dash
+
+import stock.after_hours as ah
+import datetime as dt
+import math
+import os
+import re
+
+import pandas as pd
+import streamlit as st
+
+from stock.premarket_ai import (
+    build_premarket_prompt as build_simple_premarket_prompt,
+    format_after_hours_section,
+)
 
 def now_kst() -> dt.datetime:
     return dt.datetime.now(ZoneInfo("Asia/Seoul"))
@@ -20,16 +45,6 @@ def now_kst_str() -> str:
 
 def today_kst_str() -> str:
     return now_kst().strftime("%Y-%m-%d")
-
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional, Tuple
-import datetime as dt
-import math
-import os
-import re
-
-import pandas as pd
-import streamlit as st
 
 try:
     import requests
@@ -318,6 +333,28 @@ def get_secret_or_env(key: str, default: str = "") -> str:
     except Exception:
         value = ""
     return str(value or os.getenv(key, default) or "").strip()
+
+def _item_to_dict(item: Any) -> Dict[str, Any]:
+    """
+    dataclass 모델 또는 dict를 Streamlit/Buffer 저장용 dict로 변환한다.
+    """
+    if hasattr(item, "to_dict") and callable(getattr(item, "to_dict")):
+        try:
+            return item.to_dict()
+        except Exception:
+            pass
+
+    if isinstance(item, dict):
+        return item
+
+    try:
+        return asdict(item)
+    except Exception:
+        return {}
+
+
+def _items_to_dicts(items: Optional[List[Any]]) -> List[Dict[str, Any]]:
+    return [_item_to_dict(x) for x in (items or [])]
 
 
 # ============================================================
@@ -608,6 +645,68 @@ def build_news_keywords_summary(news_items: List[NewsItem]) -> List[str]:
 
 
 # ============================================================
+# 장전 데이터 허브
+# ============================================================
+def build_premarket_dataset() -> Dict[str, Any]:
+    """
+    장전 분석용 원천 데이터를 한 번에 모은다.
+
+    현재 1단계에서는 시간외 거래 데이터만 연결한다.
+    이후 DART, ETF, KRX_TEST 이식 데이터도 이 dict에 추가한다.
+    """
+
+    after_hours_data = ah.get_after_hours_data()
+
+    return {
+        "after_hours": after_hours_data,
+    }
+
+
+def build_premarket_prompt_preview() -> str:
+    """
+    터미널 테스트용 간단 프롬프트를 생성한다.
+    실제 Streamlit 장전 분석은 generate_ai_preopen_brief()를 사용한다.
+    """
+
+    dataset = build_premarket_dataset()
+    return build_simple_premarket_prompt(dataset)
+
+def build_full_premarket_dataset(
+    latest_date: str,
+    markets: List[str],
+    candidates: List[StockPick],
+    risks: List[StockPick],
+    indicators: List[Dict[str, Any]],
+    news_items: List[NewsItem],
+    sector_results: List[Dict[str, Any]],
+    dart_items: Optional[List[Any]] = None,
+) -> PremarketData:
+    """
+    실제 장전 분석에 필요한 모든 데이터를 PremarketData 모델로 묶는다.
+    """
+
+    after_hours_data = ah.get_after_hours_data()
+
+    return PremarketData(
+        meta={
+            "briefing_time": f"{_today_str()} 07:00",
+            "latest_price_date": latest_date,
+            "markets": markets,
+            "generated_at": _now_iso(),
+        },
+        global_market=indicators,
+        news=[asdict(n) for n in news_items],
+        sectors=sector_results,
+        candidates=[asdict(p) for p in candidates],
+        risks=[asdict(p) for p in risks],
+        after_hours=after_hours_data,
+        dart=dart_items or [],
+        etf_flow=[],
+        foreign_flow=[],
+        institution_flow=[],
+    )
+
+# ============================================================
 # 점수화
 # ============================================================
 def make_candidate_reasons(row: Dict[str, Any], news_items: List[NewsItem]) -> List[str]:
@@ -737,6 +836,9 @@ def build_ai_input_text(
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
     sector_results,
+    after_hours_data: Optional[List[Dict[str, Any]]] = None,
+    dart_items: Optional[List[Any]] = None,
+    candidate_scores: Optional[List[CandidateScore]] = None,
 ) -> str:
     """
     OpenAI 장전 판단용 입력 자료를 구성한다.
@@ -778,6 +880,12 @@ def build_ai_input_text(
     parts.append("- 미국 기술주 약세 또는 금리 부담: 성장주·바이오·2차전지에는 부담 요인이 될 수 있음")
     parts.append("")
 
+    parts.append(format_after_hours_section(after_hours_data or []))
+    parts.append("")
+
+    parts.append(format_dart_section(dart_items or []))
+    parts.append("")
+
     parts.append("[장전 주요 뉴스]")
     if news_items:
         for i, n in enumerate(news_items[:15], start=1):
@@ -803,8 +911,15 @@ def build_ai_input_text(
 
     parts.append("")
 
-    parts.append("[시스템 점수 기반 매매 관심 후보]")
-    if candidates:
+    parts.append("[최종 관심도 엔진 기반 매매 관심 후보]")
+    if candidate_scores:
+        for i, s in enumerate(candidate_scores, start=1):
+            parts.append(
+                f"- {i}. {s.name}({s.ticker}) {s.market} / "
+                f"기존점수 {s.base_score} / 최종점수 {s.total_score} / 관심도 {s.stars} / "
+                f"근거: {'; '.join(s.reasons)}"
+            )
+    elif candidates:
         for i, p in enumerate(candidates, start=1):
             parts.append(
                 f"- {i}. {p.name}({p.ticker}) {p.market} / 점수 {p.score} / "
@@ -864,14 +979,48 @@ def generate_ai_preopen_brief(
     sector_results: List[Dict[str, Any]],
     model: str,
     temperature: float = 0.2,
+    after_hours_data: Optional[List[Any]] = None,
+    dart_items: Optional[List[Any]] = None,
+    candidate_scores: Optional[List[CandidateScore]] = None,
 ) -> str:
-        
+    """
+    OpenAI 장전 판단을 생성한다.
+
+    핵심:
+    - build_full_premarket_dataset()으로 장전 데이터를 한 번 묶는다.
+    - candidates 순서를 AI가 임의로 바꾸지 않도록 제한한다.
+    - 시간외 거래는 참고 정보로 반영하되, TOP5 순위 재구성에는 사용하지 않는다.
+    - 장 시작 후 체크포인트와 최종 유의사항은 화면 고정 템플릿에서 별도로 출력한다.
+    """
+
+    dataset = build_full_premarket_dataset(
+        latest_date=latest_date,
+        markets=markets,
+        candidates=candidates,
+        risks=risks,
+        indicators=indicators,
+        news_items=news_items,
+        sector_results=sector_results,
+        dart_items=dart_items,
+    )
+
+    if after_hours_data is None:
+        after_hours_data = dataset.after_hours
+    else:
+        dataset.after_hours = after_hours_data
+
+    if dart_items is None:
+        dart_items = dataset.dart
+    else:
+        dataset.dart = dart_items
+
     api_key = get_secret_or_env("OPENAI_API_KEY")
 
     if not HAS_OPENAI or not api_key:
         return rule_based_ai_brief(candidates, risks, news_items)
 
     client = OpenAI(api_key=api_key)
+
     input_text = build_ai_input_text(
         latest_date=latest_date,
         markets=markets,
@@ -880,82 +1029,124 @@ def generate_ai_preopen_brief(
         indicators=indicators,
         news_items=news_items,
         sector_results=sector_results,
+        after_hours_data=after_hours_data,
+        dart_items=dart_items,
+        candidate_scores=candidate_scores,
     )
 
-    system_prompt = """당신은 한국 주식시장 장전 브리핑을 작성하는 데이터 분석가다.
-반드시 제공된 데이터 안에서만 판단하고, 확인되지 않은 사실은 단정하지 않는다.
-투자 권유처럼 쓰지 말고, 장전 체크리스트와 매매 후보 검토 자료로 작성한다.
-분석 순서는 반드시 '거시지표 → 섹터 → 종목 → 장 시작 후 확인 조건'으로 구성한다.
-단순히 시스템 점수가 높은 종목을 나열하지 말고, 해외시장·환율·유가·뉴스 흐름과 연결되는 종목을 우선한다.
-종목을 제시할 때는 매수 단정 표현을 피하고 '관심', '점검', '확인', '주의' 표현을 사용한다."""
+    ranking_guard = """
+[중요 작성 원칙]
 
-    user_prompt = f"""
-아래 데이터를 바탕으로 한국시간 오전 7시 기준 장전 브리핑을 작성하라.
+1. '오늘 매매 관심 종목 TOP5'는 반드시 최종 관심도 엔진(candidate_scores)의 순서와 내용을 따른다. candidate_scores가 없을 때만 candidates 목록을 따른다.
+2. AI가 임의로 종목 순위를 바꾸거나 새로운 종목을 TOP5에 추가하지 않는다.
+3. 시간외 거래 종목은 별도의 참고 정보로만 설명한다.
+4. 시간외 상승·하락 종목이 최종 관심도 엔진 또는 candidates 목록에 없으면 TOP5에 넣지 않는다.
+5. '장 시작 후 체크포인트' 항목은 작성하지 않는다.
+6. '최종 유의사항' 항목도 작성하지 않는다.
+7. 장 시작 후 체크포인트와 최종 유의사항은 화면 하단의 고정 템플릿에서 별도로 출력된다.
+8. 투자 권유처럼 쓰지 말고, '관심', '점검', '확인', '주의' 표현을 사용한다.
+"""
 
-중요:
-- 종목보다 섹터를 먼저 설명한다.
-- 뉴스의 의미를 해석한다.
-- 해외시장과 한국시장 연결고리를 설명한다.
-- 투자 권유가 아니라 장전 참고자료로 작성한다.
-
+    output_format = """
 [출력 형식]
 
-## ① 오늘 시장환경
+## ① 장전 한 줄 결론
+- 오늘 시장의 핵심 방향을 한 문장으로 정리한다.
 
+## ② 오늘 시장환경
 - 해외시장 요약
-- 환율·유가·금리 영향
-- 오늘 한국시장 예상 분위기
+- 환율·유가 영향
+- 한국시장 예상 분위기
 
-## ② 강세 예상 섹터 TOP5
+## ③ 시간외 거래 특징
+- 시간외 급등 종목
+- 시간외 약세 종목
+- 다음 장에서 확인할 조건
+- 단, 시간외 종목을 임의로 TOP5에 넣지 않는다.
 
+## ④ DART 공시 체크
+- 주요 공시
+- 긍정/부정/중립 판단
+- 장전 영향도
+- 주요 공시가 없으면 '별도 주요 공시 없음'이라고 쓴다.
+
+## ⑤ 강세 예상 섹터 TOP5
 1. 섹터명
    - 강세 예상 이유
-   - 관련 뉴스
+   - 연결 데이터
    - 관련 종목
 
-## ③ 오늘 매매 후보 TOP5
-
+## ⑥ 오늘 매매 관심 종목 TOP5
 1. 종목명(종목코드)
    - 판단
    - 근거
    - 장 시작 후 확인 조건
 
-## ④ 오늘 주의 종목
-
+## ⑦ 오늘 주의 종목
 - 종목명
 - 주의 이유
+- 대응 기준
+"""
 
-## ⑤ 장 시작 후 체크포인트
+    system_prompt = f"""
+당신은 한국 주식시장 장전 브리핑을 작성하는 데이터 분석가다.
 
-- 시초가 갭
-- 거래량
-- 외국인 수급
-- 환율
-- 추가 뉴스
+반드시 제공된 데이터 안에서만 판단하고, 확인되지 않은 사실은 단정하지 않는다.
+투자 권유처럼 쓰지 말고, 장전 체크리스트와 매매 후보 검토 자료로 작성한다.
 
-마지막 줄에 반드시:
-'※ 투자 권유가 아닌 참고용 장전 분석입니다.'
+분석 순서는 반드시 다음 흐름을 따른다.
+해외시장 → 환율·유가 → 뉴스 → 시간외 거래 → DART 공시 → 섹터 → 종목
+
+단순히 시스템 점수가 높은 종목을 나열하지 말고, 해외시장·환율·유가·뉴스 흐름과 연결해 설명한다.
+다만 '오늘 매매 관심 종목 TOP5'의 종목과 순서는 반드시 최종 관심도 엔진(candidate_scores)을 따른다.
+
+{ranking_guard}
+"""
+
+    user_prompt = f"""
+아래 데이터를 바탕으로 한국시간 오전 7시 기준 한국 주식시장 장전 브리핑을 작성하라.
+
+역할:
+- 너는 증권사 리서치센터의 장전 전략 애널리스트다.
+- 투자 권유가 아니라 장전 체크리스트를 작성한다.
+- 제공된 데이터 안에서만 판단한다.
+- 확인되지 않은 사실은 추정하지 않는다.
+
+분석 원칙:
+- 종목보다 시장환경과 섹터를 먼저 설명한다.
+- 해외시장 → 환율·유가 → 뉴스 → 시간외 거래 → DART 공시 → 섹터 → 종목 순서로 연결한다.
+- 단순히 상승률이나 점수가 높은 종목을 나열하지 말고, 왜 오늘 아침에 봐야 하는지 설명한다.
+- 시간외 급등·급락은 반드시 다음 날 시초가 갭, 거래량, 뉴스·공시 지속성을 함께 확인하라고 쓴다.
+- 공시는 긍정·부정·중립을 구분하되, 실제 주가 영향은 장 시작 후 수급 확인이 필요하다고 쓴다.
+- 최종 관심도 엔진(candidate_scores)의 종목 순서와 TOP5 구성을 절대 바꾸지 않는다. candidate_scores가 없을 때만 candidates 목록을 따른다.
+- risks 목록은 주의 종목 항목에서만 사용한다.
+- '⑧ 장 시작 후 체크포인트'와 '⑨ 최종 유의사항'은 작성하지 않는다.
+
+{output_format}
 
 [데이터]
 
-   {input_text}
-   """
+{input_text}
+"""
+
     try:
         response = client.chat.completions.create(
             model=model,
             temperature=float(temperature),
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
+                {"role": "system", "content": system_prompt.strip()},
+                {"role": "user", "content": user_prompt.strip()},
             ],
         )
+
         return (response.choices[0].message.content or "").strip()
+
     except Exception as e:
         return (
             f"- OpenAI 분석 생성에 실패해 규칙 기반 요약으로 대체했습니다. 오류: {e}\n"
             + rule_based_ai_brief(candidates, risks, news_items)
         )
-
+    
 # ============================================================
 # 출력 변환
 # ============================================================
@@ -978,6 +1169,25 @@ def picks_to_dataframe(picks: List[StockPick]) -> pd.DataFrame:
                 "근거": " / ".join(p.reasons),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def candidate_scores_to_dataframe(scores: List[CandidateScore]) -> pd.DataFrame:
+    rows = []
+
+    for s in scores:
+        rows.append(
+            {
+                "시장": s.market,
+                "종목코드": s.ticker,
+                "종목명": s.name,
+                "기존점수": s.base_score,
+                "최종점수": s.total_score,
+                "관심도": s.stars,
+                "종합근거": " / ".join(s.reasons),
+            }
+        )
+
     return pd.DataFrame(rows)
 
 
@@ -1046,6 +1256,8 @@ def build_workspace_text(
     news_query: str,
     ai_brief: str = "",
     sector_results: Optional[List[Dict[str, Any]]] = None,
+    after_hours_data: Optional[List[Any]] = None,
+    dart_items: Optional[List[Any]] = None,
 ) -> str:
     today = _today_str()
 
@@ -1056,7 +1268,7 @@ def build_workspace_text(
     lines.append(f"- 실제 분석시각: {_now_iso()}")
     lines.append(f"- 분석 시장: {', '.join(markets) if markets else '사용자 입력'}")
     lines.append(f"- 분석할 후보 종목 수: {target_count}개")
-    lines.append("- 데이터 소스: FinanceDataReader + NewsAPI")
+    lines.append("- 데이터 소스: FinanceDataReader + NewsAPI + after_hours.py + DART")
     lines.append(f"- 뉴스 검색어: {news_query}")
     lines.append("")
 
@@ -1064,11 +1276,19 @@ def build_workspace_text(
     lines.append(build_market_brief(indicators))
     lines.append("")
 
-    lines.append("## ② 장전 주요 뉴스")
+    lines.append("## ② 시간외 거래")
+    lines.append(format_after_hours_section(after_hours_data or []))
+    lines.append("")
+
+    lines.append("## ③ DART 주요 공시")
+    lines.append(format_dart_section(dart_items or []))
+    lines.append("")
+
+    lines.append("## ④ 장전 주요 뉴스")
     lines.append(build_news_brief(news_items))
     lines.append("")
 
-    lines.append("## ③ 강세 예상 섹터 TOP5")
+    lines.append("## ⑤ 강세 예상 섹터 TOP5")
     if not sector_results:
         lines.append("- 뚜렷하게 감지된 강세 예상 섹터가 없습니다.")
     else:
@@ -1085,7 +1305,7 @@ def build_workspace_text(
 
             lines.append("")
 
-    lines.append("## ④ 오늘 매매 관심 종목 TOP")
+    lines.append("## ⑥ 오늘 매매 관심 종목 TOP")
     if not candidates:
         lines.append("- 조건에 맞는 매매 관심 종목이 없습니다.")
     else:
@@ -1101,7 +1321,7 @@ def build_workspace_text(
                 lines.append(f"- {r}")
             lines.append("")
 
-    lines.append("## ⑤ 오늘 주의 종목 TOP")
+    lines.append("## ⑦ 오늘 주의 종목 TOP")
     if not risks:
         lines.append("- 조건에 맞는 주의 종목이 없습니다.")
     else:
@@ -1115,17 +1335,17 @@ def build_workspace_text(
                 lines.append(f"- {r}")
             lines.append("")
 
-    lines.append("## ⑥ AI 장전 판단")
+    lines.append("## ⑧ AI 장전 판단")
     if ai_brief.strip():
         lines.append(ai_brief.strip())
     else:
         lines.append("- OpenAI 장전 판단을 사용하지 않았습니다.")
     lines.append("")
 
-    lines.append("## ⑦ 해석상 유의사항")
+    lines.append("## ⑨ 해석상 유의사항")
     lines.append("- 이 자료는 공개 주가·거래량·뉴스 흐름을 바탕으로 한 장전 참고자료입니다.")
     lines.append("- 투자 권유나 매매 추천이 아니며, 실제 매매 판단은 사용자가 별도로 검토해야 합니다.")
-    lines.append("- 현재 버전은 수급·시간외 거래·실시간 호가를 반영하지 않습니다.")
+    lines.append("- 현재 버전은 외국인·기관 수급과 실시간 호가를 반영하지 않습니다. 시간외 거래는 after_hours.py 입력 데이터 기준입니다.")
 
     return "\n".join(lines).strip() + "\n"
 
@@ -1138,6 +1358,9 @@ def build_buffer_items(
     indicators: List[Dict[str, Any]],
     news_items: List[NewsItem],
     ai_brief: str = "",
+    after_hours_data: Optional[List[Any]] = None,
+    dart_items: Optional[List[Any]] = None,
+    sector_results: Optional[List[Dict[str, Any]]] = None,
 ) -> List[Dict[str, Any]]:
     return [
         {
@@ -1145,7 +1368,7 @@ def build_buffer_items(
             "title": f"장전 주식 분석 {latest_date}",
             "text": ws_text,
             "meta": {
-                "source": "FinanceDataReader + NewsAPI",
+                "source": "FinanceDataReader + NewsAPI + after_hours.py + DART",
                 "published": latest_date,
                 "fetched_at": _now_iso(),
                 "markets": markets,
@@ -1153,11 +1376,17 @@ def build_buffer_items(
                 "risk_count": len(risks),
                 "indicators": indicators,
                 "news_count": len(news_items),
+                "after_hours_count": len(after_hours_data or []),
+                "dart_count": len(dart_items or []),
+                "sector_count": len(sector_results or []),
                 "ai_brief": ai_brief,
                 "raw": {
                     "candidates": [asdict(p) for p in candidates],
                     "risks": [asdict(p) for p in risks],
                     "news": [asdict(n) for n in news_items],
+                    "after_hours": _items_to_dicts(after_hours_data),
+                    "dart": _items_to_dicts(dart_items),
+                    "sectors": sector_results or [],
                 },
             },
         }
@@ -1173,10 +1402,14 @@ def _init_stock_cache() -> None:
         "stock_last_buffer": [],
         "stock_last_info": "",
         "stock_last_candidates_df": pd.DataFrame(),
+        "stock_last_candidate_scores_df": pd.DataFrame(),
         "stock_last_risks_df": pd.DataFrame(),
         "stock_last_news_df": pd.DataFrame(),
         "stock_last_indicators": [],
+        "stock_last_after_hours": [],
+        "stock_last_dart": [],
         "stock_last_ai_brief": "",
+        "stock_last_market_decision": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1188,10 +1421,14 @@ def clear_stock_cache() -> None:
     st.session_state.stock_last_buffer = []
     st.session_state.stock_last_info = ""
     st.session_state.stock_last_candidates_df = pd.DataFrame()
+    st.session_state.stock_last_candidate_scores_df = pd.DataFrame()
     st.session_state.stock_last_risks_df = pd.DataFrame()
     st.session_state.stock_last_news_df = pd.DataFrame()
     st.session_state.stock_last_indicators = []
+    st.session_state.stock_last_after_hours = []
+    st.session_state.stock_last_dart = []
     st.session_state.stock_last_ai_brief = ""
+    st.session_state.stock_last_market_decision = {}
 
 
 # ============================================================
@@ -1207,6 +1444,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
     newsapi_key = get_secret_or_env("NEWSAPI_KEY")
     openai_key = get_secret_or_env("OPENAI_API_KEY")
+    dart_key = get_secret_or_env("DART_API_KEY")
 
     top = st.columns([1.2, 1.2, 1, 1])
 
@@ -1257,21 +1495,46 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         )
 
         n1, n2 = st.columns(2)
+
         with n1:
-            news_limit = st.number_input("뉴스 수집 개수", min_value=5, max_value=50, value=30, step=5, key="stock_news_limit")
+            news_limit = st.number_input(
+                "뉴스 수집 개수",
+                min_value=5,
+                max_value=50,
+                value=30,
+                step=5,
+                key="stock_news_limit",
+            )
+
         with n2:
-            news_days = st.number_input("뉴스 기간(일)", min_value=1, max_value=7, value=2, step=1, key="stock_news_days")
+            news_days = st.number_input(
+                "뉴스 기간(일)",
+                min_value=1,
+                max_value=7,
+                value=2,
+                step=1,
+                key="stock_news_days",
+            )
 
         if use_news and not newsapi_key:
             st.warning("NEWSAPI_KEY가 없습니다. 뉴스 반영 없이 가격·거래량 중심으로 분석합니다.")
 
+    with st.expander("시간외 거래 설정", expanded=True):
+        use_after_hours_collector = st.checkbox(
+            "뉴스 기반 시간외 사유 자동 생성",
+            value=True,
+            key="stock_use_after_hours_collector",
+        )
+
     with st.expander("AI 장전 판단 설정", expanded=True):
         use_ai = st.checkbox("OpenAI 장전 판단 사용", value=True, key="stock_use_ai")
+
         ai_model = st.text_input(
             "OpenAI 모델",
             value=get_secret_or_env("OPENAI_MODEL", "gpt-4.1-mini") or "gpt-4.1-mini",
             key="stock_ai_model",
         )
+
         ai_temperature = st.slider(
             "AI temperature",
             min_value=0.0,
@@ -1280,39 +1543,50 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             step=0.05,
             key="stock_ai_temperature",
         )
+
         if use_ai and not openai_key:
             st.warning("OPENAI_API_KEY가 없습니다. 규칙 기반 요약으로 대체됩니다.")
 
+    with st.expander("DART 공시 설정", expanded=True):
+        use_dart = st.checkbox("DART 공시 반영", value=True, key="stock_use_dart")
+
+        d1, d2 = st.columns(2)
+
+        with d1:
+            dart_days = st.number_input(
+                "공시 조회 기간(일)",
+                min_value=1,
+                max_value=7,
+                value=1,
+                step=1,
+                key="stock_dart_days",
+            )
+
+        with d2:
+            dart_limit = st.number_input(
+                "공시 수집 개수",
+                min_value=5,
+                max_value=50,
+                value=30,
+                step=5,
+                key="stock_dart_limit",
+            )
+
+        if use_dart and not dart_key:
+            st.warning("DART_API_KEY가 없습니다. DART 공시 반영 없이 분석합니다.")
+
     st.caption(
-        "이번 버전은 전일 주가·거래량, NewsAPI 뉴스 흐름, OpenAI 장전 판단을 결합해 '오늘 매매 관심 종목'을 선별합니다. "
-        "투자 권유가 아니라 장전 체크리스트입니다."
+        "이번 버전은 전일 주가·거래량, 시간외 거래, NewsAPI 뉴스 흐름, OpenAI 장전 판단을 결합해 "
+        "'오늘 매매 관심 종목'을 선별합니다. 투자 권유가 아니라 장전 체크리스트입니다."
     )
 
     do_run = st.button("장전 분석 실행", use_container_width=True, key="stock_run")
 
     if not do_run:
         if st.session_state.stock_last_info:
-            st.success(st.session_state.stock_last_info)
-
-            if st.session_state.stock_last_indicators:
-                with st.expander("해외시장 참고 지표", expanded=False):
-                    st.dataframe(pd.DataFrame(st.session_state.stock_last_indicators), use_container_width=True, hide_index=True)
-
-            if not st.session_state.stock_last_news_df.empty:
-                with st.expander("수집 뉴스 미리보기", expanded=False):
-                    st.dataframe(st.session_state.stock_last_news_df, use_container_width=True, hide_index=True)
-
-            if not st.session_state.stock_last_candidates_df.empty:
-                with st.expander("매매 관심 종목", expanded=True):
-                    st.dataframe(st.session_state.stock_last_candidates_df, use_container_width=True, hide_index=True)
-
-            if not st.session_state.stock_last_risks_df.empty:
-                with st.expander("주의 종목", expanded=True):
-                    st.dataframe(st.session_state.stock_last_risks_df, use_container_width=True, hide_index=True)
-
-            if st.session_state.get("stock_last_ai_brief"):
-                with st.expander("AI 장전 판단", expanded=True):
-                    st.markdown(st.session_state.stock_last_ai_brief)
+            st.info(
+                "이전 장전 분석 결과가 저장되어 있습니다. 최신 결과를 보려면 '장전 분석 실행'을 다시 누르세요."
+            )
 
         return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
 
@@ -1322,17 +1596,42 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
         indicators: List[Dict[str, Any]] = []
         news_items: List[NewsItem] = []
-
-        with st.spinner("해외시장 참고 지표를 수집 중입니다..."):
-            indicators = fetch_global_indicators()
+        after_hours_data: List[Any] = []
+        dart_items: List[Any] = []
 
         if use_news and newsapi_key and news_query.strip():
             with st.spinner("NewsAPI로 장전 뉴스를 수집 중입니다..."):
                 try:
-                    news_items = fetch_newsapi_items(newsapi_key, news_query, limit=int(news_limit), days_back=int(news_days))
+                    news_items = fetch_newsapi_items(
+                        newsapi_key,
+                        news_query,
+                        limit=int(news_limit),
+                        days_back=int(news_days),
+                    )
                 except Exception as e:
                     st.warning(f"NewsAPI 수집 실패: {e}")
                     news_items = []
+
+        if use_after_hours_collector:
+            with st.spinner("뉴스 기반 시간외 거래 사유를 생성 중입니다..."):
+                collect_after_hours_sample(
+                    news_items=[asdict(n) for n in news_items],
+                    dart_items=[],
+                )
+
+        with st.spinner("시간외 거래 데이터를 불러오는 중입니다..."):
+            after_hours_data = ah.get_after_hours_data()
+
+        if use_dart and dart_key:
+            with st.spinner("DART 공시를 수집 중입니다..."):
+                dart_items = fetch_dart_disclosures(
+                    api_key=dart_key,
+                    days_back=int(dart_days),
+                    max_items=int(dart_limit),
+                )
+
+        with st.spinner("해외시장 참고 지표를 수집 중입니다..."):
+            indicators = fetch_global_indicators()
 
         rows: List[Dict[str, Any]] = []
         latest_dates: List[str] = []
@@ -1342,11 +1641,15 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
 
         for i, (ticker, name, market) in enumerate(selected_stocks, start=1):
             status.caption(f"분석 중: {name}({ticker}) {i}/{len(selected_stocks)}")
+
             row = analyze_one_stock(ticker, name, market, news_items)
+
             if row:
                 rows.append(row)
+
                 if row.get("date"):
                     latest_dates.append(str(row.get("date")))
+
             progress.progress(i / max(len(selected_stocks), 1))
 
         status.empty()
@@ -1359,15 +1662,31 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         latest_date = max(latest_dates) if latest_dates else _today_str()
         candidates, risks = score_candidates(rows, top_n=int(top_n))
 
-        sector_results = analyze_sectors(
-                indicators,
-                news_items
-        )   
+        sector_results = se.analyze_sectors(
+            indicators,
+            news_items,
+        )
+
+        market_decision = md.build_market_decision(
+            indicators=indicators,
+            news_items=news_items,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
+        )
+
+        candidate_scores = build_candidate_scores(
+            candidates=candidates,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
+        )
 
         ai_brief = ""
+
         if use_ai:
             with st.spinner("OpenAI로 AI 장전 판단을 생성 중입니다..."):
-                ai_brief = generate_ai_preopen_brief(
+                ai_brief = aip.generate_ai_preopen_brief(
                     latest_date=latest_date,
                     markets=markets,
                     candidates=candidates,
@@ -1377,9 +1696,13 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     sector_results=sector_results,
                     model=ai_model,
                     temperature=float(ai_temperature),
+                    after_hours_data=after_hours_data,
+                    dart_items=dart_items,
+                    candidate_scores=candidate_scores,
+                    market_decision=market_decision,
                 )
 
-        ws_text = build_workspace_text(
+        ws_text = wb.build_workspace_text(
             latest_date=latest_date,
             markets=markets,
             target_count=len(selected_stocks),
@@ -1389,9 +1712,14 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             news_items=news_items,
             news_query=news_query,
             ai_brief=ai_brief,
+            sector_results=sector_results,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            candidate_scores=candidate_scores,
+            market_decision=market_decision,
         )
 
-        buffer_items = build_buffer_items(
+        buffer_items = wb.build_buffer_items(
             ws_text=ws_text,
             latest_date=latest_date,
             markets=markets,
@@ -1400,56 +1728,156 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             indicators=indicators,
             news_items=news_items,
             ai_brief=ai_brief,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
+            candidate_scores=candidate_scores,
+            market_decision=market_decision,
         )
 
         candidates_df = picks_to_dataframe(candidates)
+        candidate_scores_df = candidate_scores_to_dataframe(candidate_scores)
         risks_df = picks_to_dataframe(risks)
         news_df = news_to_dataframe(news_items)
 
         st.session_state.stock_last_ws_text = ws_text
         st.session_state.stock_last_buffer = buffer_items
         st.session_state.stock_last_candidates_df = candidates_df
+        st.session_state.stock_last_candidate_scores_df = candidate_scores_df
         st.session_state.stock_last_risks_df = risks_df
         st.session_state.stock_last_news_df = news_df
         st.session_state.stock_last_indicators = indicators
+        st.session_state.stock_last_after_hours = _items_to_dicts(after_hours_data)
+        st.session_state.stock_last_dart = _items_to_dicts(dart_items)
         st.session_state.stock_last_ai_brief = ai_brief
+        st.session_state.stock_last_market_decision = market_decision.to_dict()
         st.session_state.stock_last_info = (
             f"장전 주식 분석 완료: 가격 기준일 {latest_date} / "
-            f"매매 관심 {len(candidates)}개 / 주의 {len(risks)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
+            f"매매 관심 {len(candidate_scores)}개 / 주의 {len(risks)}개 / "
+            f"시간외 {len(after_hours_data)}개 / DART {len(dart_items)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
         )
 
-        st.success(st.session_state.stock_last_info)
+        result_container = st.container()
 
-        if indicators:
-            with st.expander("해외시장 참고 지표", expanded=True):
-                st.dataframe(pd.DataFrame(indicators), use_container_width=True, hide_index=True)
+        with result_container:
+            st.success(st.session_state.stock_last_info)
 
-        if not news_df.empty:
-            with st.expander("수집 뉴스", expanded=True):
-                st.dataframe(news_df, use_container_width=True, hide_index=True)
+            # 0. 장전 Dashboard
+            dash.render_market_dashboard(
+                market_decision=market_decision,
+                candidate_scores=candidate_scores,
+                risks=risks,
+                after_hours_data=after_hours_data,
+                dart_items=dart_items,
+                sector_results=sector_results,
+                news_items=news_items,
+            )
 
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("### 오늘 매매 관심 종목")
-            if candidates_df.empty:
-                st.info("조건에 맞는 매매 관심 종목이 없습니다.")
+            # 1. AI 장전 판단
+            if ai_brief.strip():
+                with st.expander("AI 장전 판단", expanded=True):
+                    st.markdown(ai_brief)
             else:
-                st.dataframe(candidates_df, use_container_width=True, hide_index=True)
+                st.info("AI 장전 판단 결과가 없습니다.")
 
-        with c2:
-            st.markdown("### 오늘 주의 종목")
-            if risks_df.empty:
-                st.info("조건에 맞는 주의 종목이 없습니다.")
-            else:
-                st.dataframe(risks_df, use_container_width=True, hide_index=True)
+            # 2. 오늘 관심 종목 / 주의 종목
+            c1, c2 = st.columns(2)
 
-        if ai_brief.strip():
-            with st.expander("AI 장전 판단", expanded=True):
-                st.markdown(ai_brief)
+            with c1:
+                st.markdown("### 오늘 매매 관심 종목")
 
-        with st.expander("Workspace 반영용 텍스트 미리보기", expanded=False):
-            st.text_area("분석 결과", value=ws_text, height=420, disabled=True, key="stock_ws_preview")
+                if candidate_scores_df.empty:
+                    st.info("조건에 맞는 매매 관심 종목이 없습니다.")
+                else:
+                    st.dataframe(
+                        candidate_scores_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
+            with c2:
+                st.markdown("### 오늘 주의 종목")
+
+                if risks_df.empty:
+                    st.info("조건에 맞는 주의 종목이 없습니다.")
+                else:
+                    st.dataframe(
+                        risks_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 3. 시간외 거래
+            if after_hours_data:
+                with st.expander("시간외 거래 주요 종목", expanded=False):
+                    st.dataframe(
+                        pd.DataFrame(_items_to_dicts(after_hours_data)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 4. DART 주요 공시
+            if dart_items:
+                with st.expander("DART 주요 공시", expanded=False):
+                    st.dataframe(
+                        pd.DataFrame(_items_to_dicts(dart_items)),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 5. 수집 뉴스
+            if not news_df.empty:
+                with st.expander("수집 뉴스", expanded=False):
+                    st.dataframe(
+                        news_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 6. 해외시장 참고 지표
+            if indicators:
+                with st.expander("해외시장 참고 지표", expanded=False):
+                    st.dataframe(
+                        pd.DataFrame(indicators),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            # 7. 장 시작 후 체크포인트
+            with st.expander("장 시작 후 체크포인트", expanded=True):
+                st.markdown(
+                    """
+### 9시~10시 확인 순서
+
+**1. 시초가 갭**
+- 전일 종가 대비 적정 수준인지 확인합니다.
+- 일반적으로 +1~3% 수준은 양호한 관심 구간으로 볼 수 있습니다.
+- 과도한 갭 상승은 추격 매수 위험이 커질 수 있습니다.
+
+**2. 거래량 지속 여부**
+- 장 초반에도 거래량이 계속 붙는지 확인합니다.
+- 상승했지만 거래량이 줄면 탄력이 약해질 수 있습니다.
+
+**3. 외국인·기관 추정 수급**
+- 외국인과 기관의 순매수 추정 흐름이 유지되는지 참고합니다.
+- 장중 수급은 확정치가 아니라 추정치라는 점을 전제로 봐야 합니다.
+
+**4. 주가 흐름**
+- 시초가 이후 고점을 높이며 상승하는지 확인합니다.
+- 반대로 시초가를 이탈하면 단기 약세 전환 가능성을 주의합니다.
+"""
+                )
+
+            # 8. Workspace 미리보기
+            with st.expander("Workspace 반영용 텍스트 미리보기", expanded=False):
+                st.text_area(
+                    "분석 결과",
+                    value=ws_text,
+                    height=420,
+                    disabled=True,
+                    key="stock_ws_preview",
+                )
+                                
         return ws_text, buffer_items
 
     except Exception as e:
@@ -1460,7 +1888,12 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             "- requirements.txt에 finance-datareader, pandas<3가 있는지 확인\n"
             "- Streamlit Cloud에서 앱을 Reboot했는지 확인\n"
             "- NEWSAPI_KEY가 Streamlit Secrets에 저장되어 있는지 확인\n"
+            "- DART 공시 사용 시 DART_API_KEY가 Streamlit Secrets에 저장되어 있는지 확인\n"
             "- OpenAI 장전 판단 사용 시 OPENAI_API_KEY가 Streamlit Secrets에 저장되어 있는지 확인\n"
             "- FinanceDataReader 데이터 호출이 일시적으로 실패할 수 있음"
         )
+
         return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
+    
+if __name__ == "__main__":
+    print(build_premarket_prompt_preview())
