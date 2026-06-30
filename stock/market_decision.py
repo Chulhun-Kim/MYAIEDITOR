@@ -1,8 +1,9 @@
 # stock/market_decision.py
 # ------------------------------------------------------------
-# MYAIEDITOR 시장 판단 엔진 v1.1
+# MYAIEDITOR 시장 판단 엔진 v1.3
+# AI Strategy Engine
 # - 해외시장·환율·유가·뉴스·시간외·DART·섹터를 종합해
-#   장전 시장 분위기와 접근 전략을 구조화한다.
+#   장전 시장 분위기, 투자전략, 현금비중, 섹터전략을 구조화한다.
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -17,8 +18,13 @@ class MarketDecision:
     stars: str
     sentiment: str
     strategy: str
+    strategy_comment: str
+    cash_ratio: int
+    buy_ratio: int
+    sector_strategy: str
     summary: str
     reasons: List[str] = field(default_factory=list)
+    strategy_reasons: List[str] = field(default_factory=list)
     signals: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -58,12 +64,16 @@ def _news_text(item: Any) -> str:
     )
 
 
+def _fmt_pct(x: float) -> str:
+    return f"{x:+.2f}%"
+
+
 def score_to_stars(score: float) -> str:
-    if score >= 85:
+    if score >= 95:
         return "★★★★★"
-    if score >= 75:
+    if score >= 85:
         return "★★★★☆"
-    if score >= 65:
+    if score >= 70:
         return "★★★☆☆"
     if score >= 55:
         return "★★☆☆☆"
@@ -71,17 +81,98 @@ def score_to_stars(score: float) -> str:
 
 
 def classify_market(score: float) -> tuple[str, str]:
+    if score >= 95:
+        return "매우 강세", "🟢 매우 강세"
     if score >= 85:
-        return "매우 강세", "공격적 접근 가능. 다만 시초가 과열 종목은 추격 매수보다 눌림 확인이 필요합니다."
-    if score >= 75:
-        return "강세", "관심 종목 중심의 선별적 접근이 유효합니다."
-    if score >= 65:
-        return "중립 우위", "강한 섹터와 거래량이 붙는 종목만 선별적으로 확인합니다."
+        return "강세", "🟢 강세"
+    if score >= 70:
+        return "중립 우위", "🟡 중립 우위"
     if score >= 55:
-        return "중립", "무리한 추격보다 시초가·거래량·수급 확인 후 접근합니다."
+        return "중립", "🟡 중립"
     if score >= 45:
-        return "주의", "보수적 접근이 필요하며 변동성 큰 종목은 비중 관리가 우선입니다."
-    return "위험", "현금 비중과 리스크 관리가 우선입니다. 반등 확인 전까지 추격 매수는 피합니다."
+        return "주의", "🔴 주의"
+    return "위험", "🔴 위험"
+
+
+def decide_ai_strategy(score: float, signals: Dict[str, Any]) -> tuple[str, str, int, int, List[str]]:
+    """
+    AI Strategy Engine 핵심 함수.
+    시장점수와 세부 신호를 바탕으로 오늘의 전략을 결정한다.
+    """
+
+    negative_news = int(signals.get("negative_news_count", 0) or 0)
+    positive_news = int(signals.get("positive_news_count", 0) or 0)
+    after_down = int(signals.get("after_hours_down", 0) or 0)
+    after_up = int(signals.get("after_hours_up", 0) or 0)
+    negative_dart = int(signals.get("negative_dart_count", 0) or 0)
+    top_sector = signals.get("top_sector")
+
+    risk_penalty = 0
+    strategy_reasons: List[str] = []
+
+    if negative_news >= positive_news + 5:
+        risk_penalty += 1
+        strategy_reasons.append("부정 뉴스 키워드가 긍정 뉴스보다 많아 추격 매수는 신중해야 합니다.")
+
+    if after_down > after_up:
+        risk_penalty += 1
+        strategy_reasons.append("시간외 하락 종목 수가 상승 종목보다 많아 장 초반 변동성 확인이 필요합니다.")
+
+    if negative_dart >= 2:
+        risk_penalty += 1
+        strategy_reasons.append("주의 공시 키워드가 감지돼 개별 종목 리스크 관리가 필요합니다.")
+
+    if top_sector:
+        strategy_reasons.append(f"핵심 섹터는 {top_sector}로 판단됩니다.")
+
+    adjusted_score = score - risk_penalty * 5
+
+    if adjusted_score >= 95:
+        strategy = "▶ 적극 매수"
+        comment = "시장 강도가 매우 높습니다. 강한 섹터와 대형 주도주 중심의 적극 대응이 가능합니다."
+        cash_ratio = 20
+    elif adjusted_score >= 85:
+        strategy = "▶ 선별 매수"
+        comment = "시장 분위기는 우호적이지만 업종별 차별화가 예상됩니다. 강한 섹터 중심으로 선별 접근합니다."
+        cash_ratio = 30
+    elif adjusted_score >= 70:
+        strategy = "▶ 관망"
+        comment = "방향성은 나쁘지 않지만 추격 매수보다 시초가·거래량·수급 확인 후 접근하는 것이 좋습니다."
+        cash_ratio = 50
+    elif adjusted_score >= 55:
+        strategy = "▶ 현금비중 확대"
+        comment = "시장 변동성이 커질 수 있는 구간입니다. 신규 매수보다 리스크 관리가 우선입니다."
+        cash_ratio = 70
+    else:
+        strategy = "▶ 방어적 대응"
+        comment = "시장 리스크가 높은 구간입니다. 현금 비중 유지와 손실 방어를 우선합니다."
+        cash_ratio = 80
+
+    buy_ratio = 100 - cash_ratio
+
+    if not strategy_reasons:
+        strategy_reasons.append("뚜렷한 위험 신호는 제한적이나 장 초반 가격과 거래량 확인이 필요합니다.")
+
+    return strategy, comment, cash_ratio, buy_ratio, strategy_reasons[:5]
+
+
+def build_sector_strategy(sector_results: Optional[List[Dict[str, Any]]]) -> str:
+    if not sector_results:
+        return "핵심 섹터 신호가 제한적입니다."
+
+    names: List[str] = []
+    for item in sector_results[:3]:
+        sector = str(item.get("sector", "") or "")
+        if sector:
+            names.append(sector)
+
+    if not names:
+        return "핵심 섹터 신호가 제한적입니다."
+
+    if len(names) == 1:
+        return f"{names[0]} 중심으로 우선 점검합니다."
+
+    return f"{' / '.join(names)} 순서로 우선 점검합니다."
 
 
 def _indicator_score(indicators: List[Dict[str, Any]]) -> tuple[float, List[str], Dict[str, Any]]:
@@ -154,6 +245,7 @@ def _news_score(news_items: List[Any]) -> tuple[float, List[str], Dict[str, Any]
 
     pos = 0
     neg = 0
+
     for item in news_items or []:
         text = _news_text(item)
         if any(k in text for k in positive_keywords):
@@ -162,13 +254,17 @@ def _news_score(news_items: List[Any]) -> tuple[float, List[str], Dict[str, Any]
             neg += 1
 
     score = min(pos * 1.2, 10) - min(neg * 1.2, 10)
+
     reasons: List[str] = []
     if pos:
         reasons.append(f"긍정 뉴스 키워드 {pos}건 감지")
     if neg:
         reasons.append(f"주의 뉴스 키워드 {neg}건 감지")
 
-    return score, reasons, {"positive_news_count": pos, "negative_news_count": neg}
+    return score, reasons, {
+        "positive_news_count": pos,
+        "negative_news_count": neg,
+    }
 
 
 def _after_hours_score(after_hours_data: Optional[List[Any]]) -> tuple[float, List[str], Dict[str, Any]]:
@@ -181,11 +277,14 @@ def _after_hours_score(after_hours_data: Optional[List[Any]]) -> tuple[float, Li
     for item in after_hours_data or []:
         d = _item_to_dict(item)
         change = _safe_float(
-            d.get("change_rate")
-            or d.get("등락률")
+            d.get("after_change_pct")
             or d.get("after_hours_change_rate")
+            or d.get("change_rate")
+            or d.get("after_change")
+            or d.get("등락률")
             or 0
         )
+
         if change > 0:
             up += 1
             score += min(change * 0.8, 4)
@@ -219,6 +318,7 @@ def _dart_score(dart_items: Optional[List[Any]]) -> tuple[float, List[str], Dict
 
     pos = 0
     neg = 0
+
     for item in dart_items or []:
         d = _item_to_dict(item)
         text = " ".join(str(v) for v in d.values())
@@ -228,13 +328,17 @@ def _dart_score(dart_items: Optional[List[Any]]) -> tuple[float, List[str], Dict
             neg += 1
 
     score = min(pos * 2.0, 6) - min(neg * 2.5, 8)
+
     reasons: List[str] = []
     if pos:
         reasons.append(f"긍정 공시 키워드 {pos}건 감지")
     if neg:
         reasons.append(f"주의 공시 키워드 {neg}건 감지")
 
-    return score, reasons, {"positive_dart_count": pos, "negative_dart_count": neg}
+    return score, reasons, {
+        "positive_dart_count": pos,
+        "negative_dart_count": neg,
+    }
 
 
 def _sector_score(sector_results: Optional[List[Dict[str, Any]]]) -> tuple[float, List[str], Dict[str, Any]]:
@@ -244,9 +348,17 @@ def _sector_score(sector_results: Optional[List[Dict[str, Any]]]) -> tuple[float
     top = sector_results[0]
     top_score = _safe_float(top.get("score"))
     sector_name = str(top.get("sector", "") or "")
+
     score = min(top_score * 0.08, 8)
-    reasons = [f"강세 예상 섹터 상위: {sector_name}({top_score:.1f}점)"] if sector_name else []
-    return score, reasons, {"top_sector": sector_name, "top_sector_score": top_score}
+
+    reasons = []
+    if sector_name:
+        reasons.append(f"강세 예상 섹터 상위: {sector_name}({top_score:.1f}점)")
+
+    return score, reasons, {
+        "top_sector": sector_name,
+        "top_sector_score": top_score,
+    }
 
 
 def build_market_decision(
@@ -273,25 +385,51 @@ def build_market_decision(
         signals.update(part_signals)
 
     total = max(0.0, min(round(total, 1), 100.0))
+
     stars = score_to_stars(total)
-    sentiment, strategy = classify_market(total)
+    sentiment, sentiment_badge = classify_market(total)
+
+    strategy, strategy_comment, cash_ratio, buy_ratio, strategy_reasons = decide_ai_strategy(
+        score=total,
+        signals=signals,
+    )
+
+    sector_strategy = build_sector_strategy(sector_results)
 
     top_sector = signals.get("top_sector")
+
     if top_sector:
-        summary = f"오늘 시장은 {sentiment}({stars})로 판단되며, {top_sector} 중심의 흐름을 우선 점검할 필요가 있습니다."
+        summary = (
+            f"오늘 시장은 {sentiment}({stars})로 판단됩니다. "
+            f"{top_sector} 중심의 흐름을 우선 점검할 필요가 있습니다.\n\n"
+            f"전략: {strategy}. {strategy_comment}"
+        )
     else:
-        summary = f"오늘 시장은 {sentiment}({stars})로 판단되며, {strategy}"
+        summary = (
+            f"오늘 시장은 {sentiment}({stars})로 판단됩니다.\n\n"
+            f"전략: {strategy}. {strategy_comment}"
+        )
+
+    signals["sentiment_badge"] = sentiment_badge
+    signals["cash_ratio"] = cash_ratio
+    signals["buy_ratio"] = buy_ratio
+    signals["sector_strategy"] = sector_strategy
 
     if not reasons:
-        reasons.append("뚜렷한 방향성 신호가 제한적이어서 장 초반 확인이 필요")
+        reasons.append("뚜렷한 방향성 신호가 제한적이어서 장 초반 확인이 필요합니다.")
 
     return MarketDecision(
         score=total,
         stars=stars,
         sentiment=sentiment,
         strategy=strategy,
+        strategy_comment=strategy_comment,
+        cash_ratio=cash_ratio,
+        buy_ratio=buy_ratio,
+        sector_strategy=sector_strategy,
         summary=summary,
         reasons=reasons[:10],
+        strategy_reasons=strategy_reasons[:5],
         signals=signals,
     )
 
@@ -299,18 +437,25 @@ def build_market_decision(
 def format_market_decision(decision: Optional[MarketDecision]) -> str:
     if decision is None:
         return "- 시장 판단 결과가 없습니다."
+
     lines = [
         f"### 오늘 시장 판단: {decision.sentiment} {decision.stars}",
         f"- 종합점수: {decision.score}/100",
         f"- 전략: {decision.strategy}",
+        f"- 현금비중: {decision.cash_ratio}%",
+        f"- 매수비중: {decision.buy_ratio}%",
+        f"- 섹터전략: {decision.sector_strategy}",
         f"- 요약: {decision.summary}",
     ]
+
+    if decision.strategy_reasons:
+        lines.append("- 전략 근거:")
+        for r in decision.strategy_reasons[:5]:
+            lines.append(f"  - {r}")
+
     if decision.reasons:
         lines.append("- 주요 근거:")
         for r in decision.reasons[:6]:
             lines.append(f"  - {r}")
+
     return "\n".join(lines)
-
-
-def _fmt_pct(x: float) -> str:
-    return f"{x:+.2f}%"

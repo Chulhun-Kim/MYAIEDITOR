@@ -46,23 +46,34 @@ def _get_attr(obj: Any, key: str, default: Any = "") -> Any:
     return getattr(obj, key, default)
 
 
-def _names_from_candidates(items: Optional[List[Any]], limit: int = 3) -> str:
-    names: List[str] = []
+def _text_progress_bar(score: float, blocks: int = 10) -> str:
+    """
+    시장점수를 텍스트 Progress Bar로 변환한다.
+    예: 75.4점 -> ████████░░
+    """
+    score = max(0.0, min(float(score or 0), 100.0))
+    filled = round((score / 100.0) * blocks)
+    empty = blocks - filled
+    return "█" * filled + "░" * empty
 
-    for item in items or []:
+
+def _names_from_candidates(items: Optional[List[Any]], limit: int = 3) -> str:
+    rows: List[str] = []
+    numbers = ["①", "②", "③", "④", "⑤"]
+
+    for idx, item in enumerate(items or []):
+        if idx >= limit:
+            break
+
         name = _get_attr(item, "name", "")
         ticker = _get_attr(item, "ticker", "")
 
         if name and ticker:
-            names.append(f"{name}({ticker})")
+            rows.append(f"{numbers[idx]} {name} ({ticker})")
         elif name:
-            names.append(str(name))
+            rows.append(f"{numbers[idx]} {name}")
 
-        if len(names) >= limit:
-            break
-
-    return ", ".join(names) if names else "-"
-
+    return "\n\n".join(rows) if rows else "-"
 
 def _sector_names(sector_results: Optional[List[Dict[str, Any]]], limit: int = 3) -> str:
     names: List[str] = []
@@ -114,7 +125,7 @@ def _sentiment_badge(sentiment: str) -> str:
     if "약세" in sentiment:
         return "🔴 약세"
 
-    return sentiment or "중립"
+    return sentiment or "🟡 중립"
 
 
 def render_market_dashboard(
@@ -153,10 +164,9 @@ def render_market_dashboard(
         st.markdown(f"### {_sentiment_badge(sentiment)}")
 
     with c2:
-        st.caption("시장 점수")
-        st.markdown(f"### {score:.1f}/100")
+        st.markdown(f"### {score:.1f} / 100")
         st.progress(progress_value)
-        st.caption(f"시장 강도 {score:.1f}%")
+        st.caption(f"{score:.1f}%")
 
     with c3:
         st.caption("관심 종목")
@@ -186,11 +196,11 @@ def render_market_dashboard(
 
     with c7:
         st.markdown("**관심 종목 TOP**")
-        st.write(_names_from_candidates(candidate_scores))
+        st.markdown(_names_from_candidates(candidate_scores))
 
     with c8:
         st.markdown("**주의 종목 TOP**")
-        st.write(_names_from_candidates(risks))
+        st.markdown(_names_from_candidates(risks))
 
     with st.expander("Dashboard 상세 요약", expanded=False):
         st.markdown(f"- 시장 판단: {_sentiment_badge(sentiment)}")

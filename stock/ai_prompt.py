@@ -1,7 +1,8 @@
 # stock/ai_prompt.py
 # ------------------------------------------------------------
-# MYAIEDITOR OpenAI 장전 프롬프트 모듈
+# MYAIEDITOR OpenAI 장전 프롬프트 모듈 v1.4
 # - GPT 호출 및 프롬프트 생성 로직을 app_stock.py에서 분리
+# - AI Strategy Engine 결과를 장전 브리핑 최상단에 반영
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -75,12 +76,25 @@ def _news_field(n: Any, key: str) -> str:
 def _decision_field(decision: Any, key: str, default: Any = "") -> Any:
     if decision is None:
         return default
+
     if isinstance(decision, dict):
         return decision.get(key, default)
+
+    if hasattr(decision, "to_dict") and callable(getattr(decision, "to_dict")):
+        try:
+            return decision.to_dict().get(key, default)
+        except Exception:
+            pass
+
     return getattr(decision, key, default)
 
 
 def format_market_decision_input(market_decision: Any) -> str:
+    """
+    market_decision.py의 AI Strategy Engine 결과를
+    GPT 프롬프트 입력 자료로 변환한다.
+    """
+
     if market_decision is None:
         return "[오늘 시장 판단]\n- 없음"
 
@@ -88,19 +102,48 @@ def format_market_decision_input(market_decision: Any) -> str:
     stars = _decision_field(market_decision, "stars", "")
     sentiment = _decision_field(market_decision, "sentiment", "")
     strategy = _decision_field(market_decision, "strategy", "")
+    strategy_comment = _decision_field(market_decision, "strategy_comment", "")
+    cash_ratio = _decision_field(market_decision, "cash_ratio", "")
+    buy_ratio = _decision_field(market_decision, "buy_ratio", "")
+    sector_strategy = _decision_field(market_decision, "sector_strategy", "")
     summary = _decision_field(market_decision, "summary", "")
     reasons = _decision_field(market_decision, "reasons", []) or []
+    strategy_reasons = _decision_field(market_decision, "strategy_reasons", []) or []
 
-    lines = ["[오늘 시장 판단]"]
-    lines.append(f"- 시장판단: {sentiment} {stars} / 종합점수 {score}/100")
+    lines = ["[오늘 시장 판단 / AI Strategy Engine]"]
+
+    lines.append(f"- 시장판단: {sentiment}")
+    lines.append(f"- 관심도: {stars}")
+    lines.append(f"- 종합점수: {score}/100")
+
     if strategy:
-        lines.append(f"- 기본전략: {strategy}")
+        lines.append(f"- AI 전략: {strategy}")
+
+    if strategy_comment:
+        lines.append(f"- 전략 코멘트: {strategy_comment}")
+
+    if cash_ratio != "":
+        lines.append(f"- 권장 현금비중: {cash_ratio}%")
+
+    if buy_ratio != "":
+        lines.append(f"- 권장 매수비중: {buy_ratio}%")
+
+    if sector_strategy:
+        lines.append(f"- 섹터전략: {sector_strategy}")
+
     if summary:
         lines.append(f"- 요약: {summary}")
+
+    if strategy_reasons:
+        lines.append("- 전략 근거:")
+        for r in strategy_reasons[:5]:
+            lines.append(f"  - {r}")
+
     if reasons:
         lines.append("- 판단 근거:")
         for r in reasons[:8]:
             lines.append(f"  - {r}")
+
     return "\n".join(lines)
 
 
@@ -136,6 +179,7 @@ def build_ai_input_text(
             change_rate = _safe_float(it.get("change_rate"))
             date = it.get("date", "")
             memo = it.get("memo", "")
+
             parts.append(
                 f"- {name}({symbol}): {last:.2f}, "
                 f"전일 대비 {_fmt_pct(change_rate)} / 기준일 {date} / 영향 변수: {memo}"
@@ -162,7 +206,11 @@ def build_ai_input_text(
     parts.append("[장전 주요 뉴스]")
     if news_items:
         for i, n in enumerate(news_items[:15], start=1):
-            parts.append(f"- {i}. {_news_field(n, 'title')} / {_news_field(n, 'source')} / {_news_field(n, 'published')}")
+            parts.append(
+                f"- {i}. {_news_field(n, 'title')} / "
+                f"{_news_field(n, 'source')} / "
+                f"{_news_field(n, 'published')}"
+            )
             desc = _news_field(n, "description")
             if desc:
                 parts.append(f"  요약: {desc}")
@@ -223,8 +271,56 @@ def build_ai_input_text(
     return "\n".join(parts).strip()
 
 
-def rule_based_ai_brief(candidates: List[Any], risks: List[Any], news_items: List[Any]) -> str:
+def rule_based_ai_brief(
+    candidates: List[Any],
+    risks: List[Any],
+    news_items: List[Any],
+    market_decision: Optional[Any] = None,
+) -> str:
     lines: List[str] = []
+
+    if market_decision is not None:
+        score = _decision_field(market_decision, "score", "")
+        stars = _decision_field(market_decision, "stars", "")
+        sentiment = _decision_field(market_decision, "sentiment", "")
+        strategy = _decision_field(market_decision, "strategy", "")
+        strategy_comment = _decision_field(market_decision, "strategy_comment", "")
+        cash_ratio = _decision_field(market_decision, "cash_ratio", "")
+        buy_ratio = _decision_field(market_decision, "buy_ratio", "")
+        sector_strategy = _decision_field(market_decision, "sector_strategy", "")
+        strategy_reasons = _decision_field(market_decision, "strategy_reasons", []) or []
+
+        lines.append("## ① AI 투자 전략")
+        lines.append("")
+        lines.append(f"### {stars}")
+        lines.append("")
+        lines.append(f"### {strategy}")
+        lines.append("")
+        lines.append(f"- 시장 판단: {sentiment}")
+        lines.append(f"- 시장 점수: {score}/100")
+
+        if cash_ratio != "":
+            lines.append(f"- 현금 비중: {cash_ratio}%")
+
+        if buy_ratio != "":
+            lines.append(f"- 매수 비중: {buy_ratio}%")
+
+        if sector_strategy:
+            lines.append(f"- 핵심 섹터 전략: {sector_strategy}")
+
+        if strategy_comment:
+            lines.append(f"- 전략 코멘트: {strategy_comment}")
+
+        if strategy_reasons:
+            lines.append("")
+            lines.append("### 전략 근거")
+            for r in strategy_reasons[:5]:
+                lines.append(f"- {r}")
+
+        lines.append("")
+
+    lines.append("## ② 장전 한 줄 결론")
+    lines.append("")
     lines.append("- OpenAI 분석을 사용할 수 없어 규칙 기반 요약으로 대체했습니다.")
 
     keywords = build_news_keywords_summary(news_items)
@@ -243,6 +339,7 @@ def rule_based_ai_brief(candidates: List[Any], risks: List[Any], news_items: Lis
         lines.append(f"- 변동성 주의 후보는 {risk_names}입니다.")
 
     lines.append("- 이 내용은 투자 권유가 아니라 공개 데이터 기반 장전 체크리스트입니다.")
+
     return "\n".join(lines)
 
 
@@ -264,7 +361,12 @@ def generate_ai_preopen_brief(
     api_key = get_secret_or_env("OPENAI_API_KEY")
 
     if not HAS_OPENAI or not api_key:
-        return rule_based_ai_brief(candidates, risks, news_items)
+        return rule_based_ai_brief(
+            candidates=candidates,
+            risks=risks,
+            news_items=news_items,
+            market_decision=market_decision,
+        )
 
     client = OpenAI(api_key=api_key)
 
@@ -293,47 +395,68 @@ def generate_ai_preopen_brief(
 6. '최종 유의사항' 항목도 작성하지 않는다.
 7. 장 시작 후 체크포인트와 최종 유의사항은 화면 하단의 고정 템플릿에서 별도로 출력된다.
 8. 투자 권유처럼 쓰지 말고, '관심', '점검', '확인', '주의' 표현을 사용한다.
+9. 'AI 투자 전략'의 strategy, cash_ratio, buy_ratio, sector_strategy는 market_decision 값을 그대로 사용한다.
 """
 
     output_format = """
 [출력 형식]
 
-## ① 장전 한 줄 결론
-- 오늘 시장 판단 결과를 반영해 핵심 방향을 한 문장으로 정리한다.
+## ① AI 투자 전략
+
+- market_decision의 stars를 그대로 출력한다.
+- market_decision의 strategy를 그대로 출력한다.
+- market_decision의 sentiment를 그대로 출력한다.
+- market_decision의 score를 그대로 출력한다.
+- market_decision의 cash_ratio를 활용해 현금 비중을 제시한다.
+- market_decision의 buy_ratio를 활용해 매수 비중을 제시한다.
+- market_decision의 sector_strategy를 활용해 오늘 우선 점검할 섹터를 설명한다.
+- market_decision의 strategy_comment를 1문장으로 정리한다.
+- market_decision의 strategy_reasons를 활용해 전략 근거를 3~5개 bullet로 작성한다.
+
+## ② 장전 한 줄 결론
+
+- 오늘 시장 판단 결과를 한 문장으로 요약한다.
 - market_decision의 sentiment, stars, strategy를 반드시 반영한다.
 
-## ② 오늘 시장환경
+## ③ 오늘 시장환경
+
 - 오늘 시장 판단: sentiment / score / stars / strategy
 - 해외시장 요약
 - 환율·유가 영향
+- 뉴스 흐름
 - 한국시장 예상 분위기
 
-## ③ 시간외 거래 특징
+## ④ 시간외 거래 특징
+
 - 시간외 급등 종목
 - 시간외 약세 종목
 - 다음 장에서 확인할 조건
 - 단, 시간외 종목을 임의로 TOP5에 넣지 않는다.
 
-## ④ DART 공시 체크
+## ⑤ DART 공시 체크
+
 - 주요 공시
 - 긍정/부정/중립 판단
 - 장전 영향도
 - 주요 공시가 없으면 '별도 주요 공시 없음'이라고 쓴다.
 
-## ⑤ 강세 예상 섹터 TOP5
+## ⑥ 강세 예상 섹터 TOP5
+
 1. 섹터명
    - 강세 예상 이유
    - 연결 데이터
    - 관련 종목
 
-## ⑥ 오늘 매매 관심 종목 TOP5
+## ⑦ 오늘 매매 관심 종목 TOP5
+
 1. 종목명(종목코드)
    - 최종점수 / 관심도
    - 판단
    - 근거
    - 장 시작 후 확인 조건
 
-## ⑦ 오늘 주의 종목
+## ⑧ 오늘 주의 종목
+
 - 종목명
 - 주의 이유
 - 대응 기준
@@ -345,8 +468,8 @@ def generate_ai_preopen_brief(
 반드시 제공된 데이터 안에서만 판단하고, 확인되지 않은 사실은 단정하지 않는다.
 투자 권유처럼 쓰지 말고, 장전 체크리스트와 매매 후보 검토 자료로 작성한다.
 
-분석 순서는 반드시 다음 흐름을 따른다.
-해외시장 → 환율·유가 → 뉴스 → 시간외 거래 → DART 공시 → 섹터 → 종목
+가장 먼저 'AI 투자 전략'을 제시한다.
+그 다음 시장환경, 시간외 거래, DART 공시, 섹터, 종목 순서로 설명한다.
 
 단순히 시스템 점수가 높은 종목을 나열하지 말고, 해외시장·환율·유가·뉴스 흐름과 연결해 설명한다.
 다만 '오늘 매매 관심 종목 TOP5'의 종목과 순서는 반드시 최종 관심도 엔진(candidate_scores)을 따른다.
@@ -364,15 +487,20 @@ def generate_ai_preopen_brief(
 - 확인되지 않은 사실은 추정하지 않는다.
 
 분석 원칙:
-- 종목보다 오늘 시장 판단과 시장환경을 먼저 설명한다.
-- market_decision의 종합점수·관심도·전략을 먼저 반영한다.
+- 가장 먼저 '① AI 투자 전략'을 작성한다.
+- market_decision의 strategy를 그대로 사용한다.
+- market_decision의 cash_ratio와 buy_ratio를 그대로 사용한다.
+- market_decision의 sector_strategy를 그대로 사용한다.
+- market_decision의 strategy_comment와 strategy_reasons를 반영한다.
+- 그 다음 '② 장전 한 줄 결론'을 작성한다.
 - 시장판단 → 해외시장 → 환율·유가 → 뉴스 → 시간외 거래 → DART 공시 → 섹터 → 종목 순서로 연결한다.
 - 단순히 상승률이나 점수가 높은 종목을 나열하지 말고, 왜 오늘 아침에 봐야 하는지 설명한다.
 - 시간외 급등·급락은 반드시 다음 날 시초가 갭, 거래량, 뉴스·공시 지속성을 함께 확인하라고 쓴다.
 - 공시는 긍정·부정·중립을 구분하되, 실제 주가 영향은 장 시작 후 수급 확인이 필요하다고 쓴다.
-- 최종 관심도 엔진(candidate_scores)의 종목 순서와 TOP5 구성을 절대 바꾸지 않는다. candidate_scores가 없을 때만 candidates 목록을 따른다.
+- 최종 관심도 엔진(candidate_scores)의 종목 순서와 TOP5 구성을 절대 바꾸지 않는다.
+- candidate_scores가 없을 때만 candidates 목록을 따른다.
 - risks 목록은 주의 종목 항목에서만 사용한다.
-- '⑧ 장 시작 후 체크포인트'와 '⑨ 최종 유의사항'은 작성하지 않는다.
+- '⑨ 장 시작 후 체크포인트'와 '⑩ 최종 유의사항'은 작성하지 않는다.
 
 {output_format}
 
@@ -390,9 +518,16 @@ def generate_ai_preopen_brief(
                 {"role": "user", "content": user_prompt.strip()},
             ],
         )
+
         return (response.choices[0].message.content or "").strip()
+
     except Exception as e:
         return (
             f"- OpenAI 분석 생성에 실패해 규칙 기반 요약으로 대체했습니다. 오류: {e}\n"
-            + rule_based_ai_brief(candidates, risks, news_items)
+            + rule_based_ai_brief(
+                candidates=candidates,
+                risks=risks,
+                news_items=news_items,
+                market_decision=market_decision,
+            )
         )
