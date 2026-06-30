@@ -969,6 +969,69 @@ def rule_based_ai_brief(candidates: List[StockPick], risks: List[StockPick], new
     lines.append("- 이 내용은 투자 권유가 아니라 공개 데이터 기반 장전 체크리스트입니다.")
     return "\n".join(lines)
 
+
+def build_ai_strategy_header(market_decision: Any) -> str:
+    """
+    AI 장전 판단 맨 앞에 붙일 투자전략 요약 블록.
+    market_decision.py의 AI Strategy Engine 결과를 화면에 먼저 보여준다.
+    """
+
+    if market_decision is None:
+        return ""
+
+    if hasattr(market_decision, "to_dict") and callable(getattr(market_decision, "to_dict")):
+        d = market_decision.to_dict()
+    elif isinstance(market_decision, dict):
+        d = market_decision
+    else:
+        d = {}
+
+    score = _safe_float(d.get("score", 0))
+    stars = d.get("stars", "")
+    sentiment = d.get("sentiment", "")
+    strategy = d.get("strategy", "")
+    strategy_comment = d.get("strategy_comment", "")
+    cash_ratio = d.get("cash_ratio", "")
+    buy_ratio = d.get("buy_ratio", "")
+    sector_strategy = d.get("sector_strategy", "")
+    strategy_reasons = d.get("strategy_reasons", []) or []
+
+    lines: List[str] = []
+
+    lines.append("## ① AI 투자 전략")
+    lines.append("")
+    lines.append(f"### {stars}")
+    lines.append("")
+    lines.append(f"### {strategy}")
+    lines.append("")
+    lines.append(f"- 시장 판단: {sentiment}")
+    lines.append(f"- 시장 점수: {score:.1f}/100")
+
+    if cash_ratio != "":
+        lines.append(f"- 현금 비중: {cash_ratio}%")
+
+    if buy_ratio != "":
+        lines.append(f"- 매수 비중: {buy_ratio}%")
+
+    if sector_strategy:
+        lines.append(f"- 핵심 섹터 전략: {sector_strategy}")
+
+    if strategy_comment:
+        lines.append("")
+        lines.append(f"- 전략 코멘트: {strategy_comment}")
+
+    if strategy_reasons:
+        lines.append("")
+        lines.append("### 전략 근거")
+        for r in strategy_reasons[:5]:
+            lines.append(f"- {r}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    return "\n".join(lines)
+
 def generate_ai_preopen_brief(
     latest_date: str,
     markets: List[str],
@@ -1701,6 +1764,11 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     candidate_scores=candidate_scores,
                     market_decision=market_decision,
                 )
+                st.code(ai_brief[:500]) 
+                ai_strategy_header = build_ai_strategy_header(market_decision)
+
+                if ai_strategy_header:
+                    ai_brief = ai_strategy_header + ai_brief                
 
         ws_text = wb.build_workspace_text(
             latest_date=latest_date,
