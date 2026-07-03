@@ -1,9 +1,10 @@
 # stock/ai_prompt.py
 # ------------------------------------------------------------
-# MYAIEDITOR OpenAI 장전 프롬프트 모듈 v1.4
+# MYAIEDITOR OpenAI 장전 프롬프트 모듈 v1.7
 # - GPT 호출 및 프롬프트 생성 로직을 app_stock.py에서 분리
 # - AI Strategy Engine 결과를 장전 브리핑 최상단에 반영
-# - v1.4: 긍정요인 / 위험요인 / 장 시작 후 확인 항목 반영
+# - v1.7: candidate_score.py의 recommend_reasons를 AI 추천 근거로 우선 반영
+# - v1.7: 오늘 매매 관심 종목 TOP5에 추천 이유 / 세부 근거 분리
 # ------------------------------------------------------------
 
 from __future__ import annotations
@@ -71,6 +72,74 @@ def _news_field(n: Any, key: str) -> str:
     if isinstance(n, dict):
         return str(n.get(key, "") or "")
     return str(getattr(n, key, "") or "")
+
+
+def _obj_field(obj: Any, key: str, default: Any = "") -> Any:
+    """
+    dict, dataclass, 일반 객체를 모두 같은 방식으로 읽기 위한 안전 접근자.
+    CandidateScore / StockPick / dict가 섞여 들어와도 프롬프트가 깨지지 않게 한다.
+    """
+    if obj is None:
+        return default
+
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+
+    if hasattr(obj, "to_dict") and callable(getattr(obj, "to_dict")):
+        try:
+            return obj.to_dict().get(key, default)
+        except Exception:
+            pass
+
+    return getattr(obj, key, default)
+
+
+def _as_list(value: Any) -> List[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    return []
+
+
+def _recommend_reasons(obj: Any) -> List[str]:
+    """
+    v1.7 핵심 필드.
+    candidate_score.py에서 생성한 recommend_reasons를 우선 사용한다.
+    없으면 기존 reasons를 fallback으로 사용해 하위 호환성을 유지한다.
+    """
+    reasons = _as_list(_obj_field(obj, "recommend_reasons", []))
+    if not reasons:
+        reasons = _as_list(_obj_field(obj, "ai_recommend_reasons", []))
+    if not reasons:
+        reasons = _as_list(_obj_field(obj, "recommendation_reasons", []))
+
+    clean: List[str] = []
+    for r in reasons:
+        s = str(r or "").strip()
+        if s and s not in clean:
+            clean.append(s)
+
+    return clean
+
+
+def _detail_reasons(obj: Any) -> List[str]:
+    reasons = _as_list(_obj_field(obj, "reasons", []))
+    clean: List[str] = []
+    for r in reasons:
+        s = str(r or "").strip()
+        if s and s not in clean:
+            clean.append(s)
+    return clean
+
+
+def _format_reason_inline(items: List[str], limit: int = 5) -> str:
+    items = [str(x).strip() for x in items if str(x or "").strip()]
+    return "; ".join(items[:limit]) if items else "별도 추천 근거 없음"
 
 
 def _decision_field(decision: Any, key: str, default: Any = "") -> Any:
@@ -248,14 +317,29 @@ def build_ai_input_text(
         parts.append("- 없음")
     parts.append("")
 
-    parts.append("[최종 관심도 엔진 결과]")
+    parts.append("[최종 관심도 엔진 결과 / v1.7 AI 추천 근거]")
     if candidate_scores:
         for i, p in enumerate(candidate_scores, start=1):
+            name = _obj_field(p, "name", "")
+            ticker = _obj_field(p, "ticker", "")
+            market = _obj_field(p, "market", "")
+            base_score = _obj_field(p, "base_score", "")
+            total_score = _obj_field(p, "total_score", _obj_field(p, "momentum_score", ""))
+            stars = _obj_field(p, "stars", "")
+            action_label = _obj_field(p, "action_label", "관찰")
+            risk_score = _obj_field(p, "risk_score", "")
+            risk_level = _obj_field(p, "risk_level", "")
+            recommend_reasons = _recommend_reasons(p)
+            detail_reasons = _detail_reasons(p)
+
             parts.append(
-                f"- {i}. {p.name}({p.ticker}) {p.market} / "
-                f"기존점수 {p.base_score} / 최종점수 {p.total_score} / 관심도 {p.stars} / "
-                f"근거: {'; '.join(p.reasons)}"
+                f"- {i}. {name}({ticker}) {market} / "
+                f"기존점수 {base_score} / 최종점수 {total_score} / 관심도 {stars} / "
+                f"AI판단 {action_label} / 위험도 {risk_score}({risk_level})"
             )
+            parts.append(f"  AI추천근거: {_format_reason_inline(recommend_reasons, limit=5)}")
+            if detail_reasons:
+                parts.append(f"  세부근거: {_format_reason_inline(detail_reasons, limit=7)}")
     else:
         parts.append("- 없음")
     parts.append("")
@@ -295,6 +379,7 @@ def rule_based_ai_brief(
     risks: List[Any],
     news_items: List[Any],
     market_decision: Optional[Any] = None,
+    candidate_scores: Optional[List[Any]] = None,
 ) -> str:
     lines: List[str] = []
 
@@ -369,9 +454,23 @@ def rule_based_ai_brief(
     if keywords:
         lines.append(f"- 장전 뉴스에서 반복된 키워드는 {', '.join(keywords[:6])}입니다.")
 
-    if candidates:
-        top_names = ", ".join([f"{p.name}({p.ticker})" for p in candidates[:5]])
-        lines.append(f"- 시스템 점수 기준 매매 관심 상위 후보는 {top_names}입니다.")
+    final_candidates = candidate_scores or candidates
+
+    if final_candidates:
+        top_names = ", ".join([
+            f"{_obj_field(p, 'name', '')}({_obj_field(p, 'ticker', '')})"
+            for p in final_candidates[:5]
+        ])
+        lines.append(f"- 최종 관심도 엔진 기준 매매 관심 상위 후보는 {top_names}입니다.")
+
+        for p in final_candidates[:5]:
+            recommend_reasons = _recommend_reasons(p)
+            if recommend_reasons:
+                lines.append(
+                    f"  - {_obj_field(p, 'name', '')} 추천 이유: "
+                    f"{_format_reason_inline(recommend_reasons, limit=3)}"
+                )
+
         lines.append("- 장 시작 직후에는 시초가 갭, 첫 10~30분 거래량, 전일 고점 돌파 여부를 확인하는 방식이 안전합니다.")
     else:
         lines.append("- 시스템 점수 기준 매매 관심 후보가 뚜렷하지 않습니다.")
@@ -408,6 +507,7 @@ def generate_ai_preopen_brief(
             risks=risks,
             news_items=news_items,
             market_decision=market_decision,
+            candidate_scores=candidate_scores,
         )
 
     client = OpenAI(api_key=api_key)
@@ -439,6 +539,8 @@ def generate_ai_preopen_brief(
 8. 투자 권유처럼 쓰지 말고, '관심', '점검', '확인', '주의' 표현을 사용한다.
 9. 'AI 투자 전략'의 strategy, cash_ratio, buy_ratio, sector_strategy는 market_decision 값을 그대로 사용한다.
 10. market_decision의 positive_reasons, risk_reasons, check_points는 제공된 항목을 우선 사용한다.
+11. candidate_scores의 AI추천근거(recommend_reasons)를 오늘 매매 관심 종목 TOP5의 '추천 이유'에 우선 사용한다.
+12. 기존 reasons는 '세부 근거' 또는 보조 설명으로만 사용하고, 추천 이유보다 앞세우지 않는다.
 """
 
     output_format = """
@@ -497,9 +599,9 @@ def generate_ai_preopen_brief(
 ## ⑦ 오늘 매매 관심 종목 TOP5
 
 1. 종목명(종목코드)
-   - 최종점수 / 관심도
-   - 판단
-   - 근거
+   - 최종점수 / 관심도 / AI판단 / 위험도
+   - 추천 이유: candidate_scores의 AI추천근거를 2~5개 bullet로 작성한다.
+   - 세부 근거: 기존 reasons는 필요할 때만 1~3개 보조 bullet로 정리한다.
    - 장 시작 후 확인 조건
 
 ## ⑧ 오늘 주의 종목
@@ -548,6 +650,8 @@ def generate_ai_preopen_brief(
 - 시간외 급등·급락은 반드시 다음 날 시초가 갭, 거래량, 뉴스·공시 지속성을 함께 확인하라고 쓴다.
 - 공시는 긍정·부정·중립을 구분하되, 실제 주가 영향은 장 시작 후 수급 확인이 필요하다고 쓴다.
 - 최종 관심도 엔진(candidate_scores)의 종목 순서와 TOP5 구성을 절대 바꾸지 않는다.
+- candidate_scores의 AI추천근거는 각 종목의 추천 이유에 반드시 우선 반영한다.
+- 기존 reasons는 세부 근거로만 사용하고, AI추천근거와 섞어서 길게 늘어놓지 않는다.
 - candidate_scores가 없을 때만 candidates 목록을 따른다.
 - risks 목록은 주의 종목 항목에서만 사용한다.
 - '⑨ 장 시작 후 체크포인트'와 '⑩ 최종 유의사항'은 작성하지 않는다.
@@ -579,5 +683,6 @@ def generate_ai_preopen_brief(
                 risks=risks,
                 news_items=news_items,
                 market_decision=market_decision,
+                candidate_scores=candidate_scores,
             )
         )

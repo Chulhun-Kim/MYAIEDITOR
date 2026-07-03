@@ -212,14 +212,31 @@ def build_workspace_text(
             total_score = getattr(p, "total_score", getattr(p, "score", 0))
             base_score = getattr(p, "base_score", getattr(p, "score", 0))
             stars = getattr(p, "stars", "")
+
             reasons = getattr(p, "reasons", []) or []
-            lines.append(f"### {i}. {name}({ticker}) / {market} / 최종 {total_score}점 {stars}")
+            recommend_reasons = getattr(p, "recommend_reasons", []) or []
+
+            lines.append(
+                f"### {i}. {name}({ticker}) / {market} / 최종 {total_score}점 {stars}"
+            )
+
             if base_score != total_score:
                 lines.append(f"- 기존점수: {base_score}점")
-            for r in reasons[:7]:
-                lines.append(f"- {r}")
-            lines.append("")
 
+            # ===== AI 추천 근거 =====
+            if recommend_reasons:
+                lines.append("- AI 추천 근거")
+                for r in recommend_reasons[:5]:
+                    lines.append(f"  ✓ {r}")
+
+            # ===== 세부 분석 =====
+            if reasons:
+                lines.append("- 세부 분석")
+                for r in reasons[:7]:
+                    lines.append(f"  - {r}")
+
+            lines.append("")
+            
     lines.append("## ⑧ 오늘 주의 종목 TOP")
     if not risks:
         lines.append("- 조건에 맞는 주의 종목이 없습니다.")

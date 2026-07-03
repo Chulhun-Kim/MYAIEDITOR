@@ -1,17 +1,18 @@
 # stock/candidate_score.py
 # ------------------------------------------------------------
-# MYAIEDITOR 장전 후보 점수 엔진 v1.6
-# - v1.6 핵심:
+# MYAIEDITOR 장전 후보 점수 엔진 v1.7
+# - v1.7 핵심:
 #   1) 강세점수(momentum_score)와 위험도(risk_score)를 분리
 #   2) 관심 종목은 강세점수 기준으로 정렬
 #   3) 위험도는 별도 컬럼/신호로 제공
 #   4) AI 판단(action_label): 적극관찰 / 관찰 / 추격주의 / 눌림목 대기 / 제외검토
 #   5) 100점 포화 방지와 순위 차별화 유지
+#   6) AI 추천 근거(recommend_reasons)를 별도 생성
 # ------------------------------------------------------------
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -32,6 +33,9 @@ class CandidateScore:
     risk_stars: str = ""
     action_label: str = "관찰"
     risk_level: str = "보통"
+
+    # v1.7 추가 필드: Dashboard/Workspace/장전 브리핑 공통 사용
+    recommend_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -370,6 +374,99 @@ def calc_risk_score(candidate: Any, after_hours_best_change: float = 0.0, dart_n
     }
 
 
+
+def _extract_sector_name(sector: Dict[str, Any]) -> str:
+    """섹터 결과 딕셔너리에서 표시용 섹터명을 안전하게 추출한다."""
+    return str(
+        sector.get("sector")
+        or sector.get("sector_name")
+        or sector.get("name")
+        or "관련 섹터"
+    ).strip()
+
+
+def build_recommend_reasons(
+    candidate: Any,
+    signals: Dict[str, Any],
+    max_items: int = 5,
+) -> List[str]:
+    """
+    v1.7 AI 추천 근거 생성 엔진.
+
+    기존 reasons는 점수 압축, 위험도, 디버깅성 설명까지 포함한다.
+    recommend_reasons는 Dashboard/Workspace/장전 브리핑에 바로 노출할
+    짧고 사용성 높은 추천 근거만 별도로 만든다.
+    """
+    reasons: List[str] = []
+
+    def add(text: str) -> None:
+        text = str(text or "").strip()
+        if text and text not in reasons:
+            reasons.append(text)
+
+    change_rate = _safe_float(_field(candidate, "change_rate", 0))
+    volume_ratio = _safe_float(_field(candidate, "volume_ratio", 0))
+    trading_value = _safe_float(_field(candidate, "trading_value_est", 0))
+
+    after_hours_best_change = _safe_float(signals.get("after_hours_best_change", 0))
+    if after_hours_best_change > 0:
+        add(f"시간외 {_fmt_pct(after_hours_best_change)} 상승")
+    elif after_hours_best_change < 0:
+        add(f"시간외 {_fmt_pct(after_hours_best_change)} 약세")
+
+    matched_sectors = signals.get("matched_sectors", []) or []
+    if matched_sectors:
+        sector = matched_sectors[0]
+        if isinstance(sector, dict):
+            sector_name = _extract_sector_name(sector)
+            sector_score = _safe_float(sector.get("score", 0))
+            if sector_score > 0:
+                add(f"{sector_name} 섹터 강세")
+            else:
+                add(f"{sector_name} 섹터 관련")
+        else:
+            add("강세 섹터 관련")
+
+    dart_positive_hits = signals.get("dart_positive_hits", []) or []
+    if dart_positive_hits:
+        add(f"DART 긍정 공시({', '.join(dart_positive_hits[:2])})")
+
+    if volume_ratio >= 3.0:
+        add(f"거래량 {_fmt_ratio(volume_ratio)} 급증")
+    elif volume_ratio >= 2.0:
+        add(f"거래량 {_fmt_ratio(volume_ratio)} 증가")
+    elif volume_ratio >= 1.5:
+        add("거래량 증가")
+
+    if change_rate >= 10:
+        add(f"전일 {_fmt_pct(change_rate)} 강세")
+    elif change_rate >= 5:
+        add(f"전일 {_fmt_pct(change_rate)} 상승")
+    elif -5 <= change_rate < 2 and after_hours_best_change >= 1:
+        add("전일 과열 낮고 시간외 강세")
+
+    if trading_value >= 1_000_000_000_000:
+        add("거래대금 대형주급 유동성")
+    elif trading_value >= 300_000_000_000:
+        add("거래대금 풍부")
+
+    after_hours_score = _safe_float(signals.get("after_hours_score", 0))
+    sector_score = _safe_float(signals.get("sector_score", 0))
+    dart_score = _safe_float(signals.get("dart_score", 0))
+
+    if not reasons:
+        if after_hours_score > 0:
+            add("시간외 흐름 양호")
+        if sector_score > 0:
+            add("섹터 모멘텀 반영")
+        if dart_score > 0:
+            add("공시 모멘텀 반영")
+
+    if not reasons:
+        add("기본 수급·가격 모멘텀 양호")
+
+    return reasons[:max_items]
+
 def _apply_momentum_ceiling(raw_score: float, risk_score: float) -> float:
     """
     강세점수는 유지하되, 위험도가 지나치게 높으면 만점권만 제한한다.
@@ -508,6 +605,14 @@ def build_candidate_scores(
             if r and r not in deduped_reasons:
                 deduped_reasons.append(r)
 
+        recommend_reasons = build_recommend_reasons(
+            candidate=p,
+            signals=signals,
+            max_items=5,
+        )
+
+        signals["recommend_reasons"] = recommend_reasons
+
         results.append(
             CandidateScore(
                 ticker=ticker,
@@ -523,6 +628,7 @@ def build_candidate_scores(
                 risk_stars=risk_to_stars(risk_score),
                 action_label=action_label,
                 risk_level=risk_level,
+                recommend_reasons=recommend_reasons,
             )
         )
 
