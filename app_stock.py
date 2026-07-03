@@ -1,6 +1,6 @@
 # app_stock.py
 # ------------------------------------------------------------
-# 장전 주식 분석 시스템 v1.5 안정화 버전
+# 장전 주식 분석 시스템 v1.7 AI 추천 근거 연동 버전
 # - FinanceDataReader: 국내 종목 가격/거래량 + 해외 지표
 # - NewsAPI: 장전 뉴스 수집
 # - OpenAI: 장전 매매 후보 해석
@@ -355,6 +355,38 @@ def _item_to_dict(item: Any) -> Dict[str, Any]:
 
 def _items_to_dicts(items: Optional[List[Any]]) -> List[Dict[str, Any]]:
     return [_item_to_dict(x) for x in (items or [])]
+
+
+def _get_recommend_reasons(item: Any, limit: int = 5) -> List[str]:
+    """
+    v1.7 AI 추천 근거를 안전하게 가져온다.
+    - CandidateScore.recommend_reasons가 있으면 우선 사용
+    - 없으면 기존 reasons를 보조 근거로 사용
+    """
+    reasons = getattr(item, "recommend_reasons", None)
+
+    if reasons is None and isinstance(item, dict):
+        reasons = item.get("recommend_reasons")
+
+    if not reasons:
+        reasons = getattr(item, "reasons", None)
+        if reasons is None and isinstance(item, dict):
+            reasons = item.get("reasons")
+
+    out: List[str] = []
+    for r in reasons or []:
+        text = _clean(r)
+        if text and text not in out:
+            out.append(text)
+        if len(out) >= limit:
+            break
+
+    return out
+
+
+def _join_recommend_reasons(item: Any, limit: int = 3, sep: str = " · ") -> str:
+    reasons = _get_recommend_reasons(item, limit=limit)
+    return sep.join(reasons) if reasons else "-"
 
 
 # ============================================================
@@ -914,10 +946,13 @@ def build_ai_input_text(
     parts.append("[최종 관심도 엔진 기반 매매 관심 후보]")
     if candidate_scores:
         for i, s in enumerate(candidate_scores, start=1):
+            recommend = _get_recommend_reasons(s, limit=5)
             parts.append(
                 f"- {i}. {s.name}({s.ticker}) {s.market} / "
-                f"기존점수 {s.base_score} / 최종점수 {s.total_score} / 관심도 {s.stars} / "
-                f"근거: {'; '.join(s.reasons)}"
+                f"기준점수 {s.base_score} / 강세점수 {getattr(s, 'momentum_score', s.total_score)} / "
+                f"위험도 {getattr(s, 'risk_score', 0)} / AI판단 {getattr(s, 'action_label', '')} / "
+                f"관심도 {s.stars} / AI추천근거: {'; '.join(recommend)} / "
+                f"세부근거: {'; '.join(getattr(s, 'reasons', []) or [])}"
             )
     elif candidates:
         for i, p in enumerate(candidates, start=1):
@@ -1142,7 +1177,7 @@ def generate_ai_preopen_brief(
 ## ⑥ 오늘 매매 관심 종목 TOP5
 1. 종목명(종목코드)
    - 판단
-   - 근거
+   - AI 추천 이유
    - 장 시작 후 확인 조건
 
 ## ⑦ 오늘 주의 종목
@@ -1244,25 +1279,25 @@ def candidate_scores_to_dataframe(scores: List[CandidateScore]) -> pd.DataFrame:
         risk_level = getattr(s, "risk_level", "")
         risk_stars = getattr(s, "risk_stars", "")
         action_label = getattr(s, "action_label", "관찰")
+        recommend_reasons = _get_recommend_reasons(s, limit=5)
 
         rows.append(
             {
                 "시장": s.market,
                 "종목코드": s.ticker,
                 "종목명": s.name,
-                "기준점수": s.base_score,
                 "강세점수": momentum_score,
                 "위험도": risk_score,
                 "위험등급": risk_level,
                 "AI판단": action_label,
+                "AI 추천 근거": " · ".join(recommend_reasons[:3]) if recommend_reasons else "-",
                 "관심도": s.stars,
                 "위험표시": risk_stars,
-                "종합근거": " / ".join(s.reasons),
+                "기준점수": s.base_score,
             }
         )
 
     return pd.DataFrame(rows)
-
 
 def news_to_dataframe(news_items: List[NewsItem]) -> pd.DataFrame:
     return pd.DataFrame(
@@ -1331,6 +1366,7 @@ def build_workspace_text(
     sector_results: Optional[List[Dict[str, Any]]] = None,
     after_hours_data: Optional[List[Any]] = None,
     dart_items: Optional[List[Any]] = None,
+    candidate_scores: Optional[List[CandidateScore]] = None,
 ) -> str:
     today = _today_str()
 
@@ -1379,7 +1415,27 @@ def build_workspace_text(
             lines.append("")
 
     lines.append("## ⑥ 오늘 매매 관심 종목 TOP")
-    if not candidates:
+    if candidate_scores:
+        for i, s in enumerate(candidate_scores, start=1):
+            lines.append(
+                f"### {i}. {s.name}({s.ticker}) / {s.market} / "
+                f"강세점수 {getattr(s, 'momentum_score', getattr(s, 'total_score', 0))}점 / "
+                f"위험도 {getattr(s, 'risk_score', 0)}점 / {getattr(s, 'action_label', '관찰')}"
+            )
+            lines.append(f"- 관심도: {s.stars}")
+
+            recommend = _get_recommend_reasons(s, limit=5)
+            if recommend:
+                lines.append("- AI 추천 근거")
+                for r in recommend:
+                    lines.append(f"  - {r}")
+
+            detail_reasons = getattr(s, "reasons", []) or []
+            if detail_reasons:
+                lines.append(f"- 세부 근거: {' / '.join(detail_reasons[:5])}")
+
+            lines.append("")
+    elif not candidates:
         lines.append("- 조건에 맞는 매매 관심 종목이 없습니다.")
     else:
         for i, p in enumerate(candidates, start=1):
@@ -1551,7 +1607,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         )
 
     with top[3]:
-        if st.button("캐시 비우기", use_container_width=True, key="stock_clear_cache"):
+        if st.button("캐시 비우기", width="stretch", key="stock_clear_cache"):
             clear_stock_cache()
             st.success("Stock 캐시를 비웠습니다.")
             st.rerun()
@@ -1653,7 +1709,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         "'오늘 매매 관심 종목'을 선별합니다. 투자 권유가 아니라 장전 체크리스트입니다."
     )
 
-    do_run = st.button("장전 분석 실행", use_container_width=True, key="stock_run")
+    do_run = st.button("장전 분석 실행", width="stretch", key="stock_run")
 
     if not do_run:
         if st.session_state.stock_last_info:
@@ -1872,7 +1928,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 else:
                     st.dataframe(
                         candidate_scores_df,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1884,7 +1940,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 else:
                     st.dataframe(
                         risks_df,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1893,7 +1949,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 with st.expander("시간외 거래 주요 종목", expanded=False):
                     st.dataframe(
                         pd.DataFrame(_items_to_dicts(after_hours_data)),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1902,7 +1958,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 with st.expander("DART 주요 공시", expanded=False):
                     st.dataframe(
                         pd.DataFrame(_items_to_dicts(dart_items)),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1911,7 +1967,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 with st.expander("수집 뉴스", expanded=False):
                     st.dataframe(
                         news_df,
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
@@ -1920,7 +1976,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 with st.expander("해외시장 참고 지표", expanded=False):
                     st.dataframe(
                         pd.DataFrame(indicators),
-                        use_container_width=True,
+                        width="stretch",
                         hide_index=True,
                     )
 
