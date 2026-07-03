@@ -3,11 +3,11 @@
 # MYAIEDITOR OpenAI 장전 프롬프트 모듈 v1.4
 # - GPT 호출 및 프롬프트 생성 로직을 app_stock.py에서 분리
 # - AI Strategy Engine 결과를 장전 브리핑 최상단에 반영
+# - v1.4: 긍정요인 / 위험요인 / 장 시작 후 확인 항목 반영
 # ------------------------------------------------------------
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 import datetime as dt
@@ -89,6 +89,15 @@ def _decision_field(decision: Any, key: str, default: Any = "") -> Any:
     return getattr(decision, key, default)
 
 
+def _append_bullets(lines: List[str], title: str, items: List[Any], limit: int = 8) -> None:
+    if not items:
+        return
+
+    lines.append(title)
+    for item in items[:limit]:
+        lines.append(f"  - {item}")
+
+
 def format_market_decision_input(market_decision: Any) -> str:
     """
     market_decision.py의 AI Strategy Engine 결과를
@@ -109,6 +118,11 @@ def format_market_decision_input(market_decision: Any) -> str:
     summary = _decision_field(market_decision, "summary", "")
     reasons = _decision_field(market_decision, "reasons", []) or []
     strategy_reasons = _decision_field(market_decision, "strategy_reasons", []) or []
+
+    # v1.4 추가
+    positive_reasons = _decision_field(market_decision, "positive_reasons", []) or []
+    risk_reasons = _decision_field(market_decision, "risk_reasons", []) or []
+    check_points = _decision_field(market_decision, "check_points", []) or []
 
     lines = ["[오늘 시장 판단 / AI Strategy Engine]"]
 
@@ -134,15 +148,20 @@ def format_market_decision_input(market_decision: Any) -> str:
     if summary:
         lines.append(f"- 요약: {summary}")
 
+    if positive_reasons:
+        _append_bullets(lines, "- 긍정요인:", positive_reasons, limit=8)
+
+    if risk_reasons:
+        _append_bullets(lines, "- 위험요인:", risk_reasons, limit=8)
+
+    if check_points:
+        _append_bullets(lines, "- 장 시작 후 확인:", check_points, limit=6)
+
     if strategy_reasons:
-        lines.append("- 전략 근거:")
-        for r in strategy_reasons[:5]:
-            lines.append(f"  - {r}")
+        _append_bullets(lines, "- 전략 근거:", strategy_reasons, limit=5)
 
     if reasons:
-        lines.append("- 판단 근거:")
-        for r in reasons[:8]:
-            lines.append(f"  - {r}")
+        _append_bullets(lines, "- 판단 근거:", reasons, limit=8)
 
     return "\n".join(lines)
 
@@ -290,6 +309,11 @@ def rule_based_ai_brief(
         sector_strategy = _decision_field(market_decision, "sector_strategy", "")
         strategy_reasons = _decision_field(market_decision, "strategy_reasons", []) or []
 
+        # v1.4 추가
+        positive_reasons = _decision_field(market_decision, "positive_reasons", []) or []
+        risk_reasons = _decision_field(market_decision, "risk_reasons", []) or []
+        check_points = _decision_field(market_decision, "check_points", []) or []
+
         lines.append("## ① AI 투자 전략")
         lines.append("")
         lines.append(f"### {stars}")
@@ -310,6 +334,24 @@ def rule_based_ai_brief(
 
         if strategy_comment:
             lines.append(f"- 전략 코멘트: {strategy_comment}")
+
+        if positive_reasons:
+            lines.append("")
+            lines.append("### 긍정요인")
+            for r in positive_reasons[:8]:
+                lines.append(f"- {r}")
+
+        if risk_reasons:
+            lines.append("")
+            lines.append("### 위험요인")
+            for r in risk_reasons[:8]:
+                lines.append(f"- {r}")
+
+        if check_points:
+            lines.append("")
+            lines.append("### 장 시작 후 확인")
+            for r in check_points[:6]:
+                lines.append(f"- {r}")
 
         if strategy_reasons:
             lines.append("")
@@ -391,11 +433,12 @@ def generate_ai_preopen_brief(
 2. AI가 임의로 종목 순위를 바꾸거나 새로운 종목을 TOP5에 추가하지 않는다.
 3. 시간외 거래 종목은 별도의 참고 정보로만 설명한다.
 4. 시간외 상승·하락 종목이 candidate_scores 또는 candidates 목록에 없으면 TOP5에 넣지 않는다.
-5. '장 시작 후 체크포인트' 항목은 작성하지 않는다.
+5. '장 시작 후 체크포인트' 항목은 별도로 만들지 않는다.
 6. '최종 유의사항' 항목도 작성하지 않는다.
 7. 장 시작 후 체크포인트와 최종 유의사항은 화면 하단의 고정 템플릿에서 별도로 출력된다.
 8. 투자 권유처럼 쓰지 말고, '관심', '점검', '확인', '주의' 표현을 사용한다.
 9. 'AI 투자 전략'의 strategy, cash_ratio, buy_ratio, sector_strategy는 market_decision 값을 그대로 사용한다.
+10. market_decision의 positive_reasons, risk_reasons, check_points는 제공된 항목을 우선 사용한다.
 """
 
     output_format = """
@@ -411,7 +454,11 @@ def generate_ai_preopen_brief(
 - market_decision의 buy_ratio를 활용해 매수 비중을 제시한다.
 - market_decision의 sector_strategy를 활용해 오늘 우선 점검할 섹터를 설명한다.
 - market_decision의 strategy_comment를 1문장으로 정리한다.
-- market_decision의 strategy_reasons를 활용해 전략 근거를 3~5개 bullet로 작성한다.
+- market_decision의 positive_reasons를 활용해 '긍정요인'을 3~8개 bullet로 작성한다.
+- market_decision의 risk_reasons를 활용해 '위험요인'을 1~8개 bullet로 작성한다.
+- market_decision의 check_points를 활용해 '장 시작 후 확인'을 3~6개 bullet로 작성한다.
+- market_decision의 strategy_reasons는 필요할 경우 '전략 근거'에 보조적으로 반영한다.
+- 제공된 근거를 우선 사용하고, 데이터에 없는 사실을 임의로 추가하지 않는다.
 
 ## ② 장전 한 줄 결론
 
@@ -492,6 +539,9 @@ def generate_ai_preopen_brief(
 - market_decision의 cash_ratio와 buy_ratio를 그대로 사용한다.
 - market_decision의 sector_strategy를 그대로 사용한다.
 - market_decision의 strategy_comment와 strategy_reasons를 반영한다.
+- market_decision의 positive_reasons, risk_reasons, check_points를 그대로 활용한다.
+- 긍정요인과 위험요인을 반드시 구분해서 작성한다.
+- 장 시작 후 확인 항목은 market_decision의 check_points를 우선 사용한다.
 - 그 다음 '② 장전 한 줄 결론'을 작성한다.
 - 시장판단 → 해외시장 → 환율·유가 → 뉴스 → 시간외 거래 → DART 공시 → 섹터 → 종목 순서로 연결한다.
 - 단순히 상승률이나 점수가 높은 종목을 나열하지 말고, 왜 오늘 아침에 봐야 하는지 설명한다.
