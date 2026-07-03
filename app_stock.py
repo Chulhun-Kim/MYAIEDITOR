@@ -1,6 +1,6 @@
 # app_stock.py
 # ------------------------------------------------------------
-# 장전 주식 분석 시스템 3차 버전
+# 장전 주식 분석 시스템 v1.5 안정화 버전
 # - FinanceDataReader: 국내 종목 가격/거래량 + 해외 지표
 # - NewsAPI: 장전 뉴스 수집
 # - OpenAI: 장전 매매 후보 해석
@@ -1239,14 +1239,24 @@ def candidate_scores_to_dataframe(scores: List[CandidateScore]) -> pd.DataFrame:
     rows = []
 
     for s in scores:
+        momentum_score = getattr(s, "momentum_score", getattr(s, "total_score", 0))
+        risk_score = getattr(s, "risk_score", 0)
+        risk_level = getattr(s, "risk_level", "")
+        risk_stars = getattr(s, "risk_stars", "")
+        action_label = getattr(s, "action_label", "관찰")
+
         rows.append(
             {
                 "시장": s.market,
                 "종목코드": s.ticker,
                 "종목명": s.name,
-                "기존점수": s.base_score,
-                "최종점수": s.total_score,
+                "기준점수": s.base_score,
+                "강세점수": momentum_score,
+                "위험도": risk_score,
+                "위험등급": risk_level,
+                "AI판단": action_label,
                 "관심도": s.stars,
+                "위험표시": risk_stars,
                 "종합근거": " / ".join(s.reasons),
             }
         )
@@ -1662,6 +1672,10 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         after_hours_data: List[Any] = []
         dart_items: List[Any] = []
 
+        candidates: List[StockPick] = []
+        risks: List[StockPick] = []
+        final_candidate_scores: List[CandidateScore] = []
+
         if use_news and newsapi_key and news_query.strip():
             with st.spinner("NewsAPI로 장전 뉴스를 수집 중입니다..."):
                 try:
@@ -1723,11 +1737,19 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             return st.session_state.stock_last_ws_text, st.session_state.stock_last_buffer
 
         latest_date = max(latest_dates) if latest_dates else _today_str()
+
         candidates, risks = score_candidates(rows, top_n=int(top_n))
 
         sector_results = se.analyze_sectors(
             indicators,
             news_items,
+        )
+
+        final_candidate_scores = build_candidate_scores(
+            candidates=candidates,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
         )
 
         market_decision = md.build_market_decision(
@@ -1736,13 +1758,9 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             after_hours_data=after_hours_data,
             dart_items=dart_items,
             sector_results=sector_results,
-        )
-
-        candidate_scores = build_candidate_scores(
+            candidate_scores=final_candidate_scores,
             candidates=candidates,
-            after_hours_data=after_hours_data,
-            dart_items=dart_items,
-            sector_results=sector_results,
+            risks=risks,
         )
 
         ai_brief = ""
@@ -1761,14 +1779,9 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     temperature=float(ai_temperature),
                     after_hours_data=after_hours_data,
                     dart_items=dart_items,
-                    candidate_scores=candidate_scores,
+                    candidate_scores=final_candidate_scores,
                     market_decision=market_decision,
                 )
-                st.code(ai_brief[:500]) 
-                ai_strategy_header = build_ai_strategy_header(market_decision)
-
-                if ai_strategy_header:
-                    ai_brief = ai_strategy_header + ai_brief                
 
         ws_text = wb.build_workspace_text(
             latest_date=latest_date,
@@ -1783,7 +1796,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             sector_results=sector_results,
             after_hours_data=after_hours_data,
             dart_items=dart_items,
-            candidate_scores=candidate_scores,
+            candidate_scores=final_candidate_scores,
             market_decision=market_decision,
         )
 
@@ -1799,12 +1812,12 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             after_hours_data=after_hours_data,
             dart_items=dart_items,
             sector_results=sector_results,
-            candidate_scores=candidate_scores,
+            candidate_scores=final_candidate_scores,
             market_decision=market_decision,
         )
 
         candidates_df = picks_to_dataframe(candidates)
-        candidate_scores_df = candidate_scores_to_dataframe(candidate_scores)
+        candidate_scores_df = candidate_scores_to_dataframe(final_candidate_scores)
         risks_df = picks_to_dataframe(risks)
         news_df = news_to_dataframe(news_items)
 
@@ -1821,7 +1834,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         st.session_state.stock_last_market_decision = market_decision.to_dict()
         st.session_state.stock_last_info = (
             f"장전 주식 분석 완료: 가격 기준일 {latest_date} / "
-            f"매매 관심 {len(candidate_scores)}개 / 주의 {len(risks)}개 / "
+            f"매매 관심 {len(final_candidate_scores)}개 / 주의 {len(risks)}개 / "
             f"시간외 {len(after_hours_data)}개 / DART {len(dart_items)}개 / 뉴스 {len(news_items)}건 / 생성 {_now_iso()}"
         )
 
@@ -1833,7 +1846,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             # 0. 장전 Dashboard
             dash.render_market_dashboard(
                 market_decision=market_decision,
-                candidate_scores=candidate_scores,
+                candidate_scores=final_candidate_scores,
                 risks=risks,
                 after_hours_data=after_hours_data,
                 dart_items=dart_items,
@@ -1852,7 +1865,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             c1, c2 = st.columns(2)
 
             with c1:
-                st.markdown("### 오늘 매매 관심 종목")
+                st.markdown("### 오늘 강세 관심 종목")
 
                 if candidate_scores_df.empty:
                     st.info("조건에 맞는 매매 관심 종목이 없습니다.")
@@ -1864,7 +1877,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                     )
 
             with c2:
-                st.markdown("### 오늘 주의 종목")
+                st.markdown("### 오늘 과열·변동성 주의 종목")
 
                 if risks_df.empty:
                     st.info("조건에 맞는 주의 종목이 없습니다.")
