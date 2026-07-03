@@ -1917,32 +1917,31 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             else:
                 st.info("AI 장전 판단 결과가 없습니다.")
 
-            # 2. 오늘 관심 종목 / 주의 종목
-            c1, c2 = st.columns(2)
+            # 2. 오늘 관심 종목
+            st.markdown("### 오늘 강세 관심 종목")
 
-            with c1:
-                st.markdown("### 오늘 강세 관심 종목")
+            if candidate_scores_df.empty:
+                st.info("조건에 맞는 매매 관심 종목이 없습니다.")
+            else:
+                st.dataframe(
+                    candidate_scores_df,
+                    width="stretch",
+                    hide_index=True,
+                )
 
-                if candidate_scores_df.empty:
-                    st.info("조건에 맞는 매매 관심 종목이 없습니다.")
-                else:
-                    st.dataframe(
-                        candidate_scores_df,
-                        width="stretch",
-                        hide_index=True,
-                    )
+            st.markdown("---")
 
-            with c2:
-                st.markdown("### 오늘 과열·변동성 주의 종목")
+            # 2-1. 오늘 주의 종목
+            st.markdown("### 오늘 과열·변동성 주의 종목")
 
-                if risks_df.empty:
-                    st.info("조건에 맞는 주의 종목이 없습니다.")
-                else:
-                    st.dataframe(
-                        risks_df,
-                        width="stretch",
-                        hide_index=True,
-                    )
+            if risks_df.empty:
+                st.info("조건에 맞는 주의 종목이 없습니다.")
+            else:
+                st.dataframe(
+                    risks_df,
+                    width="stretch",
+                    hide_index=True,
+                )
 
             # 3. 시간외 거래
             if after_hours_data:
