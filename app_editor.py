@@ -310,7 +310,7 @@ def commit_controls(
     c1, c2, c3 = st.columns(3)
 
     with c1:
-        if st.button("Workspace 반영", use_container_width=True, key=f"{key_prefix}_ws"):
+        if st.button("Workspace 반영", width='stretch', key=f"{key_prefix}_ws"):
             ws_text_safe = to_workspace_text(ws_text)
 
             if not ws_text_safe:
@@ -332,7 +332,7 @@ def commit_controls(
                 st.success("Workspace에 반영했습니다.")
 
     with c2:
-        if st.button("Buffer 반영", use_container_width=True, key=f"{key_prefix}_buf"):
+        if st.button("Buffer 반영", width='stretch', key=f"{key_prefix}_buf"):
             normalized_items = normalize_buffer_items(buf_items)
 
             if not normalized_items:
@@ -344,7 +344,7 @@ def commit_controls(
                 st.success(f"Buffer에 {len(normalized_items)}개 반영했습니다.")
 
     with c3:
-        if st.button("둘 다 반영", use_container_width=True, key=f"{key_prefix}_both"):
+        if st.button("둘 다 반영", width='stretch', key=f"{key_prefix}_both"):
             did = False
 
             ws_text_safe = to_workspace_text(ws_text)
@@ -504,7 +504,7 @@ def render_file_panel_simple() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         st.session_state.get("article_file_preview", extracted)
     )
 
-    if not st.button("파일 반영 준비", use_container_width=True, key="file_prepare"):
+    if not st.button("파일 반영 준비", width='stretch', key="file_prepare"):
         if st.session_state.file_last_info:
             st.success(st.session_state.file_last_info)
 
@@ -813,27 +813,27 @@ with st.sidebar:
         st.caption(f"NEWSAPI_KEY 읽힘: {newsapi_loaded}")
 
     with st.expander("초기화", expanded=False):
-        if st.button("전체 비우기", use_container_width=True, key="btn_reset_all"):
+        if st.button("전체 비우기", width='stretch', key="btn_reset_all"):
             reset_all()
             st.rerun()
 
-        if st.button("Workspace 비우기", use_container_width=True, key="btn_reset_workspace"):
+        if st.button("Workspace 비우기", width='stretch', key="btn_reset_workspace"):
             reset_workspace()
             st.rerun()
 
-        if st.button("Buffer 비우기", use_container_width=True, key="btn_reset_buffer"):
+        if st.button("Buffer 비우기", width='stretch', key="btn_reset_buffer"):
             reset_buffer()
             st.rerun()
 
-        if st.button("Draft 비우기", use_container_width=True, key="btn_reset_drafts"):
+        if st.button("Draft 비우기", width='stretch', key="btn_reset_drafts"):
             reset_drafts()
             st.rerun()
 
-        if st.button("Text 입력 상태 비우기", use_container_width=True, key="btn_reset_text_panel"):
+        if st.button("Text 입력 상태 비우기", width='stretch', key="btn_reset_text_panel"):
             reset_text_panel()
             st.rerun()
 
-        if st.button("File 업로드 상태 비우기", use_container_width=True, key="btn_reset_file_panel"):
+        if st.button("File 업로드 상태 비우기", width='stretch', key="btn_reset_file_panel"):
             reset_file_panel()
             st.rerun()
 
@@ -843,7 +843,7 @@ with st.sidebar:
             data=(st.session_state.workspace_text or "").encode("utf-8"),
             file_name=f"workspace_{now_compact()}.txt",
             mime="text/plain",
-            use_container_width=True,
+            width='stretch',
         )
 
         st.download_button(
@@ -855,7 +855,7 @@ with st.sidebar:
             ).encode("utf-8"),
             file_name=f"buffer_{now_compact()}.json",
             mime="application/json",
-            use_container_width=True,
+            width='stretch',
         )
 
         st.download_button(
@@ -867,7 +867,7 @@ with st.sidebar:
             ).encode("utf-8"),
             file_name=f"drafts_{now_compact()}.json",
             mime="application/json",
-            use_container_width=True,
+            width='stretch',
         )
 
 
@@ -1099,7 +1099,7 @@ with st.expander("② Draft 생성 열기", expanded=False):
         if not st.session_state.workspace_text.strip():
             st.warning("Workspace가 비어 있습니다.")
 
-        if st.button("Workspace 1개 생성 → Draft 추가", use_container_width=True):
+        if st.button("Workspace 1개 생성 → Draft 추가", width='stretch'):
             context = normalize_space(st.session_state.workspace_text)
 
             if not context:
@@ -1138,7 +1138,7 @@ with st.expander("② Draft 생성 열기", expanded=False):
         if not buf:
             st.warning("Buffer가 비어 있습니다.")
 
-        if st.button("Buffer 통합 1개 생성 → Draft 추가", use_container_width=True):
+        if st.button("Buffer 통합 1개 생성 → Draft 추가", width='stretch'):
             if not buf:
                 st.error("Buffer가 비어 있어 생성할 수 없습니다.")
             else:
@@ -1186,7 +1186,7 @@ with st.expander("② Draft 생성 열기", expanded=False):
             key="per_item_n",
         )
 
-        if st.button("Buffer 항목별 생성 → Draft 추가", use_container_width=True):
+        if st.button("Buffer 항목별 생성 → Draft 추가", width='stretch'):
             if not buf:
                 st.error("Buffer가 비어 있어 생성할 수 없습니다.")
             else:
@@ -1303,7 +1303,7 @@ with st.expander("③ Draft 편집 열기", expanded=False):
         c1, c2, c3 = st.columns(3)
 
         with c1:
-            if st.button("편집 저장", use_container_width=True):
+            if st.button("편집 저장", width='stretch'):
                 update_draft(
                     draft,
                     st.session_state.draft_edit_title,
@@ -1316,7 +1316,7 @@ with st.expander("③ Draft 편집 열기", expanded=False):
                 st.success("저장했습니다.")
 
         with c2:
-            with st.popover("원문 / role 열람", use_container_width=True):
+            with st.popover("원문 / role 열람", width='stretch'):
                 meta = draft.get("meta") or {}
                 original_context = meta.get("original_context", "")
                 roles = meta.get("roles", {}) or {}
@@ -1351,7 +1351,7 @@ with st.expander("③ Draft 편집 열기", expanded=False):
         with c3:
             st.button(
                 "이 Draft 삭제",
-                use_container_width=True,
+                width='stretch',
                 on_click=cb_delete_selected_draft,
             )
 
@@ -1368,7 +1368,7 @@ with st.expander("③ Draft 편집 열기", expanded=False):
             data=txt_data,
             file_name=f"draft_{idx + 1}_{now_compact()}.txt",
             mime="text/plain",
-            use_container_width=True,
+            width='stretch',
         )
 
         st.download_button(
@@ -1380,5 +1380,5 @@ with st.expander("③ Draft 편집 열기", expanded=False):
             ).encode("utf-8"),
             file_name=f"draft_{idx + 1}_{now_compact()}.json",
             mime="application/json",
-            use_container_width=True,
+            width='stretch',
         )
