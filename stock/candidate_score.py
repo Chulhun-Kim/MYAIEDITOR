@@ -1,6 +1,6 @@
 # stock/candidate_score.py
 # ------------------------------------------------------------
-# MYAIEDITOR 장전 후보 점수 엔진 v1.7
+# MYAIEDITOR 장전 후보 점수 엔진 v1.9
 # - v1.7 핵심:
 #   1) 강세점수(momentum_score)와 위험도(risk_score)를 분리
 #   2) 관심 종목은 강세점수 기준으로 정렬
@@ -8,12 +8,50 @@
 #   4) AI 판단(action_label): 적극관찰 / 관찰 / 추격주의 / 눌림목 대기 / 제외검토
 #   5) 100점 포화 방지와 순위 차별화 유지
 #   6) AI 추천 근거(recommend_reasons)를 별도 생성
+#   7) NewsAPI 뉴스 흐름을 추천 근거에 반영
+#   8) v1.8 기업 프로파일 DB를 추천 근거에 반영
+#   9) v1.9 Reason Ranking Engine + Dynamic Company Tags 반영
 # ------------------------------------------------------------
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    from stock.company_profile import (
+        build_dynamic_tags_from_news,
+        get_company_keywords,
+        get_company_reason,
+        get_company_sector,
+        get_company_watch,
+    )
+except Exception:
+    # company_profile.py가 아직 없거나 import에 실패해도 점수 엔진은 동작해야 한다.
+    def build_dynamic_tags_from_news(name: str = "", ticker: str = "", news_items: Optional[List[Any]] = None, max_tags: int = 5) -> List[str]:
+        return []
+
+    def get_company_keywords(name: str = "", ticker: str = "") -> List[str]:
+        return []
+
+    def get_company_reason(name: str = "", ticker: str = "") -> str:
+        return ""
+
+    def get_company_sector(name: str = "", ticker: str = "") -> str:
+        return ""
+
+    def get_company_watch(name: str = "", ticker: str = "") -> str:
+        return ""
+
+try:
+    from stock.reason_ranker import build_reason_sentence, rank_reasons
+except Exception:
+    def rank_reasons(reasons: List[str], signals: Optional[Dict[str, Any]] = None, max_items: int = 5) -> List[str]:
+        return list(reasons or [])[:max_items]
+
+    def build_reason_sentence(reasons: List[str], max_items: int = 3) -> str:
+        selected = list(reasons or [])[:max_items]
+        return " · ".join(selected)
 
 
 @dataclass
@@ -166,6 +204,87 @@ def _normalize_base_score(score: float) -> float:
     return min(compressed, 92.0)
 
 
+def _contains_any(text: str, keywords: List[str]) -> bool:
+    text = str(text or "").lower()
+    return any(str(k).lower() in text for k in keywords)
+
+
+def _news_item_text(item: Any) -> str:
+    """
+    NewsItem dataclass/dict를 모두 처리해 뉴스 텍스트를 만든다.
+    """
+    d = _item_to_dict(item)
+
+    if d:
+        return " ".join(
+            str(d.get(k, "") or "")
+            for k in ["title", "description", "content", "summary", "source", "published"]
+        )
+
+    return " ".join(
+        str(getattr(item, k, "") or "")
+        for k in ["title", "description", "content", "summary", "source", "published"]
+    )
+
+
+def _count_keywords(text: str, keywords: List[str]) -> int:
+    text = str(text or "")
+    return sum(text.lower().count(str(k).lower()) for k in keywords)
+
+
+def _build_news_signals(
+    name: str,
+    ticker: str,
+    news_items: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    """
+    v1.7 뉴스 기반 추천 근거 생성을 위한 신호를 만든다.
+    """
+    items = list(news_items or [])
+    if not items:
+        return {
+            "news_text": "",
+            "matched_news_count": 0,
+            "theme_hits": {},
+        }
+
+    all_text_parts: List[str] = []
+    matched_count = 0
+
+    for item in items:
+        text = _news_item_text(item)
+        all_text_parts.append(text)
+
+        if _match_stock_name(text, name, ticker):
+            matched_count += 1
+
+    news_text = " ".join(all_text_parts)
+
+    theme_keywords: Dict[str, List[str]] = {
+        "ai_semiconductor": ["AI", "인공지능", "반도체", "HBM", "엔비디아", "NVIDIA", "SK하이닉스", "삼성전자"],
+        "defense": ["방산", "국방", "무기", "수출", "K9", "천무", "전차", "미사일", "폴란드", "루마니아"],
+        "shipbuilding": ["조선", "선박", "LNG", "해양플랜트", "수주", "선가"],
+        "nuclear_power": ["원전", "SMR", "원자력", "전력", "전력망", "변압기"],
+        "battery": ["2차전지", "배터리", "전기차", "테슬라", "리튬", "양극재", "음극재"],
+        "bio": ["바이오", "의약품", "FDA", "임상", "허가", "신약"],
+        "auto": ["자동차", "현대차", "기아", "전기차", "자율주행"],
+        "finance": ["금리", "은행", "금융", "배당", "주주환원"],
+        "robot": ["로봇", "휴머노이드", "자동화"],
+        "export": ["수출", "환율", "달러", "원화", "관세"],
+    }
+
+    theme_hits = {
+        theme: _count_keywords(news_text, keywords)
+        for theme, keywords in theme_keywords.items()
+    }
+
+    return {
+        "news_text": news_text,
+        "matched_news_count": matched_count,
+        "theme_hits": theme_hits,
+    }
+
+
 def calc_after_hours_score(
     name: str,
     ticker: str,
@@ -298,7 +417,11 @@ def calc_sector_score(
     return score, reasons[:3], {"matched_sectors": matched[:3]}
 
 
-def calc_risk_score(candidate: Any, after_hours_best_change: float = 0.0, dart_negative_hits: Optional[List[str]] = None) -> Tuple[float, List[str], Dict[str, Any]]:
+def calc_risk_score(
+    candidate: Any,
+    after_hours_best_change: float = 0.0,
+    dart_negative_hits: Optional[List[str]] = None,
+) -> Tuple[float, List[str], Dict[str, Any]]:
     """
     v1.6 위험도 전용 점수.
     이 값은 관심 후보에서 제외하기 위한 점수가 아니라, 추격매수 위험을 분리 표시하기 위한 점수다.
@@ -374,7 +497,6 @@ def calc_risk_score(candidate: Any, after_hours_best_change: float = 0.0, dart_n
     }
 
 
-
 def _extract_sector_name(sector: Dict[str, Any]) -> str:
     """섹터 결과 딕셔너리에서 표시용 섹터명을 안전하게 추출한다."""
     return str(
@@ -385,9 +507,259 @@ def _extract_sector_name(sector: Dict[str, Any]) -> str:
     ).strip()
 
 
+
+# ------------------------------------------------------------
+# v1.7.1 종목-섹터별 뉴스 근거 매칭
+# ------------------------------------------------------------
+# 뉴스 전체 흐름을 모든 종목에 공통 적용하지 않기 위해,
+# 종목명/섹터명으로 후보 테마를 먼저 좁힌 뒤 관련 뉴스 근거만 붙인다.
+
+THEME_LABELS: Dict[str, str] = {
+    "ai_semiconductor": "AI·반도체 뉴스 모멘텀",
+    "defense": "방산 뉴스 모멘텀",
+    "shipbuilding": "조선 업종 뉴스 모멘텀",
+    "nuclear_power": "원전·전력 뉴스 모멘텀",
+    "battery": "2차전지 뉴스 모멘텀",
+    "bio": "바이오 뉴스 모멘텀",
+    "auto": "자동차 뉴스 모멘텀",
+    "finance": "금융·배당 뉴스 모멘텀",
+    "robot": "로봇 뉴스 모멘텀",
+}
+
+SECTOR_TO_THEMES: Dict[str, List[str]] = {
+    "반도체·AI": ["ai_semiconductor"],
+    "반도체": ["ai_semiconductor"],
+    "AI": ["ai_semiconductor"],
+    "방산": ["defense"],
+    "조선": ["shipbuilding"],
+    "원전": ["nuclear_power"],
+    "전력": ["nuclear_power"],
+    "전력·전선": ["nuclear_power"],
+    "2차전지": ["battery"],
+    "배터리": ["battery"],
+    "자동차": ["auto"],
+    "바이오": ["bio"],
+    "금융": ["finance"],
+    "로봇": ["robot"],
+}
+
+STOCK_TO_THEMES: Dict[str, List[str]] = {
+    # 반도체·AI
+    "삼성전자": ["ai_semiconductor"],
+    "SK하이닉스": ["ai_semiconductor"],
+    "한미반도체": ["ai_semiconductor"],
+    "리노공업": ["ai_semiconductor"],
+    "ISC": ["ai_semiconductor"],
+    "주성엔지니어링": ["ai_semiconductor"],
+    "원익IPS": ["ai_semiconductor"],
+    "LX세미콘": ["ai_semiconductor"],
+    "이오테크닉스": ["ai_semiconductor"],
+    "에스앤에스텍": ["ai_semiconductor"],
+    "솔브레인": ["ai_semiconductor"],
+    "원익QnC": ["ai_semiconductor"],
+
+    # 2차전지
+    "LG에너지솔루션": ["battery"],
+    "삼성SDI": ["battery"],
+    "에코프로비엠": ["battery"],
+    "에코프로": ["battery"],
+    "포스코퓨처엠": ["battery"],
+    "LG화학": ["battery"],
+    "엘앤에프": ["battery"],
+    "천보": ["battery"],
+    "SK아이이테크놀로지": ["battery"],
+
+    # 방산
+    "한화에어로스페이스": ["defense"],
+    "LIG넥스원": ["defense"],
+    "현대로템": ["defense"],
+    "한화시스템": ["defense"],
+    "한국항공우주": ["defense"],
+
+    # 조선
+    "HD현대중공업": ["shipbuilding"],
+    "삼성중공업": ["shipbuilding"],
+    "HD한국조선해양": ["shipbuilding"],
+    "HD현대미포": ["shipbuilding"],
+    "한화오션": ["shipbuilding"],
+
+    # 원전·전력
+    "두산에너빌리티": ["nuclear_power"],
+    "한전기술": ["nuclear_power"],
+    "한국전력": ["nuclear_power"],
+    "하이록코리아": ["nuclear_power"],
+    "대한전선": ["nuclear_power"],
+    "LS": ["nuclear_power"],
+    "LS에코에너지": ["nuclear_power"],
+    "LS ELECTRIC": ["nuclear_power"],
+
+    # 자동차
+    "현대차": ["auto"],
+    "기아": ["auto"],
+    "현대모비스": ["auto"],
+    "HL만도": ["auto"],
+
+    # 바이오
+    "셀트리온": ["bio"],
+    "삼성바이오로직스": ["bio"],
+    "알테오젠": ["bio"],
+    "휴젤": ["bio"],
+    "클래시스": ["bio"],
+
+    # 금융
+    "KB금융": ["finance"],
+    "신한지주": ["finance"],
+    "하나금융지주": ["finance"],
+    "우리금융지주": ["finance"],
+
+    # 로봇
+    "두산로보틱스": ["robot"],
+    "레인보우로보틱스": ["robot"],
+    "로보스타": ["robot"],
+}
+
+EXPORT_SENSITIVE_THEMES = {"ai_semiconductor", "defense", "shipbuilding", "auto"}
+
+
+
+def _map_sector_to_themes(sector_name: str) -> List[str]:
+    """섹터명을 뉴스 테마 코드로 변환한다."""
+    out: List[str] = []
+    sector_name = str(sector_name or "").strip()
+
+    if not sector_name:
+        return out
+
+    for key, mapped_themes in SECTOR_TO_THEMES.items():
+        if key and key in sector_name:
+            for theme in mapped_themes:
+                if theme not in out:
+                    out.append(theme)
+
+    return out
+
+
+def _build_company_profile_signals(candidate: Any, signals: Dict[str, Any], news_items: Optional[List[Any]] = None) -> Dict[str, Any]:
+    """
+    v1.8 기업 프로파일 신호를 생성한다.
+    - 종목별 고유 사업/테마 근거를 추천 근거에 반영한다.
+    - 향후 Dashboard/Workspace에서 활용할 수 있도록 signals에도 저장한다.
+    """
+    name = str(_field(candidate, "name", "") or "").strip()
+    ticker = str(_field(candidate, "ticker", "") or "").strip()
+
+    company_reason = get_company_reason(name=name, ticker=ticker)
+    company_sector = get_company_sector(name=name, ticker=ticker)
+    company_keywords = get_company_keywords(name=name, ticker=ticker)
+    company_watch = get_company_watch(name=name, ticker=ticker)
+    dynamic_tags = build_dynamic_tags_from_news(
+        name=name,
+        ticker=ticker,
+        news_items=news_items,
+        max_tags=5,
+    )
+
+    profile_signals = {
+        "company_reason": company_reason,
+        "company_sector": company_sector,
+        "company_keywords": company_keywords,
+        "company_watch": company_watch,
+        "dynamic_tags": dynamic_tags,
+    }
+
+    signals.update(profile_signals)
+    return profile_signals
+
+def _infer_candidate_themes(candidate: Any, signals: Dict[str, Any]) -> List[str]:
+    """
+    종목명과 매칭된 섹터를 함께 보고 이 종목에 적용 가능한 뉴스 테마를 추정한다.
+    """
+    themes: List[str] = []
+
+    def add_theme(theme: str) -> None:
+        if theme and theme not in themes:
+            themes.append(theme)
+
+    name = str(_field(candidate, "name", "") or "").strip()
+
+    for theme in STOCK_TO_THEMES.get(name, []):
+        add_theme(theme)
+
+    # v1.8: 기업 프로파일에 등록된 섹터도 테마 추론에 활용한다.
+    company_sector = str(signals.get("company_sector") or get_company_sector(name=name) or "").strip()
+    for theme in _map_sector_to_themes(company_sector):
+        add_theme(theme)
+
+    matched_sectors = signals.get("matched_sectors", []) or []
+    for sector in matched_sectors:
+        if not isinstance(sector, dict):
+            continue
+        sector_name = _extract_sector_name(sector)
+        for theme in _map_sector_to_themes(sector_name):
+            add_theme(theme)
+
+    return themes
+
+
+def _add_news_theme_reasons(
+    add_func: Any,
+    candidate: Any,
+    signals: Dict[str, Any],
+    news_items: Optional[List[Any]] = None,
+) -> None:
+    """
+    v1.7.1 뉴스 기반 추천 근거.
+
+    핵심 원칙:
+    - 종목 직접 언급 뉴스는 그대로 반영한다.
+    - 시장 전체 뉴스 키워드는 해당 종목의 섹터/테마와 맞을 때만 반영한다.
+    - 따라서 KB금융에 반도체 뉴스, LIG넥스원에 조선 뉴스가 붙는 문제를 방지한다.
+    """
+    name = str(_field(candidate, "name", ""))
+    ticker = str(_field(candidate, "ticker", ""))
+
+    news_signals = _build_news_signals(name=name, ticker=ticker, news_items=news_items)
+    signals["matched_news_count"] = news_signals.get("matched_news_count", 0)
+    signals["theme_hits"] = news_signals.get("theme_hits", {})
+
+    matched_news_count = int(news_signals.get("matched_news_count", 0) or 0)
+    theme_hits = news_signals.get("theme_hits", {}) or {}
+    candidate_themes = _infer_candidate_themes(candidate, signals)
+    signals["candidate_themes"] = candidate_themes
+
+    # 1) 종목명이 뉴스에 직접 언급된 경우는 가장 강한 근거다.
+    if matched_news_count >= 3:
+        add_func(f"종목 직접 뉴스 {matched_news_count}건")
+    elif matched_news_count >= 1:
+        add_func("종목 뉴스 직접 언급")
+
+    # 2) 섹터/테마가 맞는 뉴스만 근거로 채택한다.
+    for theme in candidate_themes:
+        hit_count = int(theme_hits.get(theme, 0) or 0)
+        if hit_count <= 0:
+            continue
+
+        label = THEME_LABELS.get(theme)
+        if not label:
+            continue
+
+        # 해당 섹터 뉴스가 여러 번 반복되면 '증가', 아니면 '모멘텀'으로 표현한다.
+        if hit_count >= 3:
+            add_func(label.replace("모멘텀", "증가"))
+        else:
+            add_func(label)
+
+    # 3) 수출·환율 이슈는 모든 종목에 붙이지 않는다.
+    #    수출 민감 섹터일 때만 보조 근거로 사용한다.
+    export_hits = int(theme_hits.get("export", 0) or 0)
+    if export_hits >= 3 and any(t in EXPORT_SENSITIVE_THEMES for t in candidate_themes):
+        add_func("수출·환율 이슈 부각")
+
+
 def build_recommend_reasons(
     candidate: Any,
     signals: Dict[str, Any],
+    news_items: Optional[List[Any]] = None,
     max_items: int = 5,
 ) -> List[str]:
     """
@@ -407,12 +779,25 @@ def build_recommend_reasons(
     change_rate = _safe_float(_field(candidate, "change_rate", 0))
     volume_ratio = _safe_float(_field(candidate, "volume_ratio", 0))
     trading_value = _safe_float(_field(candidate, "trading_value_est", 0))
+    news_hits = _safe_float(_field(candidate, "news_hits", 0))
+
+    # v1.8: 기업 프로파일 기반 고유 추천 근거
+    profile_signals = _build_company_profile_signals(candidate, signals, news_items=news_items)
 
     after_hours_best_change = _safe_float(signals.get("after_hours_best_change", 0))
     if after_hours_best_change > 0:
         add(f"시간외 {_fmt_pct(after_hours_best_change)} 상승")
     elif after_hours_best_change < 0:
         add(f"시간외 {_fmt_pct(after_hours_best_change)} 약세")
+
+    company_reason = str(profile_signals.get("company_reason", "") or "").strip()
+    dynamic_tags = profile_signals.get("dynamic_tags", []) or []
+
+    # v1.9: 오늘 뉴스에서 기업 핵심 키워드가 실제로 감지되면 정적 프로파일보다 우선한다.
+    if dynamic_tags:
+        add(f"오늘 뉴스 내 {'·'.join(dynamic_tags[:3])} 모멘텀")
+    elif company_reason:
+        add(company_reason)
 
     matched_sectors = signals.get("matched_sectors", []) or []
     if matched_sectors:
@@ -426,6 +811,14 @@ def build_recommend_reasons(
                 add(f"{sector_name} 섹터 관련")
         else:
             add("강세 섹터 관련")
+
+    # v1.7 핵심: 뉴스 기반 추천 근거
+    _add_news_theme_reasons(
+        add_func=add,
+        candidate=candidate,
+        signals=signals,
+        news_items=news_items,
+    )
 
     dart_positive_hits = signals.get("dart_positive_hits", []) or []
     if dart_positive_hits:
@@ -444,6 +837,11 @@ def build_recommend_reasons(
         add(f"전일 {_fmt_pct(change_rate)} 상승")
     elif -5 <= change_rate < 2 and after_hours_best_change >= 1:
         add("전일 과열 낮고 시간외 강세")
+
+    if news_hits >= 3:
+        add(f"종목명 뉴스 {int(news_hits)}건")
+    elif news_hits >= 1:
+        add("종목명 뉴스 확인")
 
     if trading_value >= 1_000_000_000_000:
         add("거래대금 대형주급 유동성")
@@ -465,7 +863,14 @@ def build_recommend_reasons(
     if not reasons:
         add("기본 수급·가격 모멘텀 양호")
 
-    return reasons[:max_items]
+    ranked_reasons = rank_reasons(
+        reasons=reasons,
+        signals=signals,
+        max_items=max_items,
+    )
+    signals["recommend_reason_sentence"] = build_reason_sentence(ranked_reasons, max_items=3)
+    return ranked_reasons
+
 
 def _apply_momentum_ceiling(raw_score: float, risk_score: float) -> float:
     """
@@ -526,6 +931,7 @@ def build_candidate_scores(
     after_hours_data: Optional[List[Any]] = None,
     dart_items: Optional[List[Any]] = None,
     sector_results: Optional[List[Dict[str, Any]]] = None,
+    news_items: Optional[List[Any]] = None,
 ) -> List[CandidateScore]:
     results: List[CandidateScore] = []
 
@@ -608,6 +1014,7 @@ def build_candidate_scores(
         recommend_reasons = build_recommend_reasons(
             candidate=p,
             signals=signals,
+            news_items=news_items,
             max_items=5,
         )
 

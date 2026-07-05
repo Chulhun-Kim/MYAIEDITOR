@@ -247,6 +247,7 @@ def build_ai_input_text(
     dart_items: Optional[List[Any]] = None,
     candidate_scores: Optional[List[Any]] = None,
     market_decision: Optional[Any] = None,
+    market_story: Optional[Dict[str, Any]] = None,
 ) -> str:
     parts: List[str] = []
 
@@ -257,6 +258,28 @@ def build_ai_input_text(
 
     parts.append(format_market_decision_input(market_decision))
     parts.append("")
+
+    if market_story:
+        parts.append("[오늘 시장 스토리]")
+        if market_story.get("headline"):
+            parts.append(f"- 제목: {market_story['headline']}")
+        if market_story.get("summary"):
+            parts.append(f"- 요약: {market_story['summary']}")
+        for x in market_story.get("flow", []):
+            parts.append(f"  - {x}")
+        if market_story.get("drivers"):
+            parts.append("- 핵심 동인:")
+            for x in market_story.get("drivers", [])[:5]:
+                parts.append(f"  - {x}")
+        if market_story.get("risks"):
+            parts.append("- 리스크:")
+            for x in market_story.get("risks", [])[:5]:
+                parts.append(f"  - {x}")
+        if market_story.get("watch_points"):
+            parts.append("- 장 시작 체크포인트:")
+            for x in market_story.get("watch_points", [])[:5]:
+                parts.append(f"  - {x}")
+        parts.append("")
 
     parts.append("[해외시장·거시지표]")
     if indicators:
@@ -338,6 +361,9 @@ def build_ai_input_text(
                 f"AI판단 {action_label} / 위험도 {risk_score}({risk_level})"
             )
             parts.append(f"  AI추천근거: {_format_reason_inline(recommend_reasons, limit=5)}")
+            narrative = _obj_field(p, "narrative_text", "")
+            if narrative:
+                parts.append(f"  AI종합분석: {narrative}")
             if detail_reasons:
                 parts.append(f"  세부근거: {_format_reason_inline(detail_reasons, limit=7)}")
     else:
@@ -498,6 +524,7 @@ def generate_ai_preopen_brief(
     dart_items: Optional[List[Any]] = None,
     candidate_scores: Optional[List[Any]] = None,
     market_decision: Optional[Any] = None,
+    market_story: Optional[Dict[str, Any]] = None,
 ) -> str:
     api_key = get_secret_or_env("OPENAI_API_KEY")
 
@@ -524,6 +551,7 @@ def generate_ai_preopen_brief(
         dart_items=dart_items,
         candidate_scores=candidate_scores,
         market_decision=market_decision,
+        market_story=market_story,
     )
 
     ranking_guard = """

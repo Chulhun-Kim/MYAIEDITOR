@@ -14,6 +14,7 @@ import datetime as dt
 from stock.dart_api import format_dart_section
 from stock.premarket_ai import format_after_hours_section
 from stock.sector_engine import build_news_keywords_summary
+from stock.narrative_builder import build_narrative
 
 
 def _now_kst() -> dt.datetime:
@@ -152,6 +153,7 @@ def build_workspace_text(
     dart_items: Optional[List[Any]] = None,
     candidate_scores: Optional[List[Any]] = None,
     market_decision: Optional[Any] = None,
+    market_story: Optional[Dict[str, Any]] = None,
 ) -> str:
     today = _today_str()
     final_candidates = candidate_scores or candidates
@@ -170,6 +172,16 @@ def build_workspace_text(
     lines.append("## ① 오늘 시장 판단")
     lines.append(format_market_decision_section(market_decision))
     lines.append("")
+
+    if market_story:
+        lines.append("## 시장 스토리")
+        if market_story.get("headline"):
+            lines.append(f"- {market_story['headline']}")
+        if market_story.get("summary"):
+            lines.append(f"- {market_story['summary']}")
+        for f in market_story.get("flow", []):
+            lines.append(f"  • {f}")
+        lines.append("")
 
     lines.append("## ② 오늘 시장 환경")
     lines.append(build_market_brief(indicators))
@@ -228,6 +240,21 @@ def build_workspace_text(
                 lines.append("- AI 추천 근거")
                 for r in recommend_reasons[:5]:
                     lines.append(f"  ✓ {r}")
+
+            narrative = getattr(p, "narrative_text", "")
+            if not narrative:
+                try:
+                    narrative = build_narrative(
+                        candidate_name=name,
+                        recommend_reasons=recommend_reasons,
+                        signals={}
+                    )
+                except Exception:
+                    narrative = ""
+
+            if narrative:
+                lines.append("- AI 종합 분석")
+                lines.append(f"  {narrative}")
 
             # ===== 세부 분석 =====
             if reasons:
