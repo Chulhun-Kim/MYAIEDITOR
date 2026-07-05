@@ -23,6 +23,19 @@ from stock import workspace_builder as wb
 from stock import market_decision as md
 from stock import market_dashboard as dash
 
+try:
+    from stock.market_story_engine import build_market_story
+except Exception:
+    def build_market_story(
+        market_decision=None,
+        news_items=None,
+        sector_results=None,
+        candidate_scores=None,
+        after_hours_data=None,
+        dart_items=None,
+    ):
+        return {}
+
 import stock.after_hours as ah
 import datetime as dt
 import math
@@ -355,6 +368,43 @@ def _item_to_dict(item: Any) -> Dict[str, Any]:
 
 def _items_to_dicts(items: Optional[List[Any]]) -> List[Dict[str, Any]]:
     return [_item_to_dict(x) for x in (items or [])]
+
+
+def _render_market_dashboard_safe(
+    market_decision: Any,
+    candidate_scores: List[Any],
+    risks: List[Any],
+    after_hours_data: List[Any],
+    dart_items: List[Any],
+    sector_results: List[Dict[str, Any]],
+    news_items: List[Any],
+    market_story: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    market_dashboard.py가 아직 v2.0 인자를 받지 못하는 경우에도
+    기존 Dashboard가 깨지지 않도록 안전하게 호출한다.
+    """
+    try:
+        dash.render_market_dashboard(
+            market_decision=market_decision,
+            candidate_scores=candidate_scores,
+            risks=risks,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
+            news_items=news_items,
+            market_story=market_story,
+        )
+    except TypeError:
+        dash.render_market_dashboard(
+            market_decision=market_decision,
+            candidate_scores=candidate_scores,
+            risks=risks,
+            after_hours_data=after_hours_data,
+            dart_items=dart_items,
+            sector_results=sector_results,
+            news_items=news_items,
+        )
 
 
 def _get_recommend_reasons(item: Any, limit: int = 5) -> List[str]:
@@ -1539,6 +1589,7 @@ def _init_stock_cache() -> None:
         "stock_last_dart": [],
         "stock_last_ai_brief": "",
         "stock_last_market_decision": {},
+        "stock_last_market_story": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1558,6 +1609,7 @@ def clear_stock_cache() -> None:
     st.session_state.stock_last_dart = []
     st.session_state.stock_last_ai_brief = ""
     st.session_state.stock_last_market_decision = {}
+    st.session_state.stock_last_market_story = {}
 
 
 # ============================================================
@@ -1731,6 +1783,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         candidates: List[StockPick] = []
         risks: List[StockPick] = []
         final_candidate_scores: List[CandidateScore] = []
+        market_story: Dict[str, Any] = {}
 
         if use_news and newsapi_key and news_query.strip():
             with st.spinner("NewsAPI로 장전 뉴스를 수집 중입니다..."):
@@ -1806,6 +1859,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             after_hours_data=after_hours_data,
             dart_items=dart_items,
             sector_results=sector_results,
+            news_items=news_items,
         )
 
         market_decision = md.build_market_decision(
@@ -1817,6 +1871,18 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             candidate_scores=final_candidate_scores,
             candidates=candidates,
             risks=risks,
+        )
+
+        # -------------------------------------------------
+        # v2.0 Market Story Engine
+        # -------------------------------------------------
+        market_story = build_market_story(
+            market_decision=_item_to_dict(market_decision),
+            news_items=[asdict(n) for n in news_items],
+            sector_results=sector_results,
+            candidate_scores=_items_to_dicts(final_candidate_scores),
+            after_hours_data=_items_to_dicts(after_hours_data),
+            dart_items=_items_to_dicts(dart_items),
         )
 
         ai_brief = ""
@@ -1888,6 +1954,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
         st.session_state.stock_last_dart = _items_to_dicts(dart_items)
         st.session_state.stock_last_ai_brief = ai_brief
         st.session_state.stock_last_market_decision = market_decision.to_dict()
+        st.session_state.stock_last_market_story = market_story
         st.session_state.stock_last_info = (
             f"장전 주식 분석 완료: 가격 기준일 {latest_date} / "
             f"매매 관심 {len(final_candidate_scores)}개 / 주의 {len(risks)}개 / "
@@ -1900,7 +1967,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
             st.success(st.session_state.stock_last_info)
 
             # 0. 장전 Dashboard
-            dash.render_market_dashboard(
+            _render_market_dashboard_safe(
                 market_decision=market_decision,
                 candidate_scores=final_candidate_scores,
                 risks=risks,
@@ -1908,6 +1975,7 @@ def render_stock_panel() -> Tuple[Optional[str], List[Dict[str, Any]]]:
                 dart_items=dart_items,
                 sector_results=sector_results,
                 news_items=news_items,
+                market_story=market_story,
             )
 
             # 1. AI 장전 판단
